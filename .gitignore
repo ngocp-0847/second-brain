@@ -1,0 +1,11 @@
+# build artifacts
+/target
+node_modules/
+ui/dist/
+src-tauri/gen/
+
+# dữ liệu app sinh ra trong vault (không bao giờ thuộc repo)
+.brain/
+
+# model cache nếu lỡ tải về thư mục làm việc
+.fastembed_cache/
