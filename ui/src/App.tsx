@@ -80,8 +80,9 @@ export default function App() {
   const [janitorBusy, setJanitorBusy] = createSignal(false);
   const [janitorBadge, setJanitorBadge] = createSignal(false);
 
-  // Agent chat sidebar + terminal panel + git sync
+  // Agent chat sidebar + terminal panel + git sync + panel phải (backlinks)
   const [chatOpen, setChatOpen] = createSignal(localStorage.getItem("chatOpen") === "1");
+  const [rightOpen, setRightOpen] = createSignal(localStorage.getItem("rightOpen") !== "0");
   const [termVisible, setTermVisible] = createSignal(false);
   const [syncBusy, setSyncBusy] = createSignal(false);
 
@@ -557,6 +558,12 @@ export default function App() {
     localStorage.setItem("chatOpen", v ? "1" : "0");
   };
 
+  const toggleRight = () => {
+    const v = !rightOpen();
+    setRightOpen(v);
+    localStorage.setItem("rightOpen", v ? "1" : "0");
+  };
+
   /** Sync GitHub một chạm: add → commit → push (git CLI chạy trong vault). */
   const gitSync = async () => {
     if (syncBusy()) return;
@@ -729,7 +736,7 @@ export default function App() {
   });
 
   return (
-    <div class="app" classList={{ "chat-open": chatOpen() }}>
+    <div class="app" classList={{ "chat-open": chatOpen(), "right-closed": !rightOpen() }}>
       <nav class="ribbon">
         <button title="Tìm hoặc tạo note (Ctrl+K / Ctrl+O)" onClick={() => { setOmniOpen(true); setOmniQuery(""); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}>🔍</button>
         <button title="Hỏi đáp vault" onClick={() => { setOmniOpen(true); setOmniQuery("? "); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}>💬</button>
@@ -817,6 +824,14 @@ export default function App() {
             )}
           </For>
           <button class="tab-add" title="Tab mới (Ctrl+T)" onClick={newTab}>＋</button>
+          <div class="tabbar-spacer" />
+          <button
+            class="tab-add"
+            title={rightOpen() ? "Đóng panel phải (backlinks)" : "Mở panel phải (backlinks)"}
+            onClick={toggleRight}
+          >
+            {rightOpen() ? "◨" : "◧"}
+          </button>
         </div>
         <div class="note-header">
           <span class="note-path">
@@ -905,7 +920,12 @@ export default function App() {
         </Show>
       </aside>
 
-      <ChatPanel visible={chatOpen()} currentPath={current()} onVaultChanged={vaultChanged} />
+      <ChatPanel
+        visible={chatOpen()}
+        currentPath={current()}
+        onVaultChanged={vaultChanged}
+        onClose={toggleChat}
+      />
 
       <footer class="statusbar">
         <span>{status()}</span>

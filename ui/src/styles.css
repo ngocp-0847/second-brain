@@ -59,9 +59,21 @@ body {
   height: 100vh;
 }
 
-/* Mở chat agent → thêm cột thứ 5 bên phải */
+/* Panel phải (backlinks) và chat agent đều đóng/mở được → grid co giãn theo tổ hợp */
 .app.chat-open {
   grid-template-columns: 46px 230px 1fr 230px 320px;
+}
+
+.app.right-closed {
+  grid-template-columns: 46px 230px 1fr;
+}
+
+.app.right-closed.chat-open {
+  grid-template-columns: 46px 230px 1fr 320px;
+}
+
+.app.right-closed .rightbar {
+  display: none;
 }
 
 /* ---- ribbon (icon dọc kiểu Obsidian) ---- */
@@ -314,6 +326,10 @@ details[open] > .tree-dir::before {
 .tab-add:hover {
   background: var(--hover);
   color: var(--fg-strong);
+}
+
+.tabbar-spacer {
+  flex: 1;
 }
 
 .note-header {
