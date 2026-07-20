@@ -250,6 +250,48 @@ impl Vault {
         Ok(fixed)
     }
 
+    /// Liệt kê mọi thư mục con (path tương đối, "/"), bỏ SKIP_DIRS — để UI hiện cả folder rỗng.
+    pub fn list_dirs(&self) -> Vec<String> {
+        WalkDir::new(&self.root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !(e.file_type().is_dir() && SKIP_DIRS.contains(&name.as_ref()))
+            })
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_dir())
+            .filter_map(|e| {
+                let rel = e
+                    .path()
+                    .strip_prefix(&self.root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (!rel.is_empty()).then_some(rel)
+            })
+            .collect()
+    }
+
+    /// Đổi tên / di chuyển thư mục rồi re-index. Wikilink theo stem vẫn resolve
+    /// sau khi index lại; link markdown theo path tuyệt đối sẽ do janitor bắt nếu gãy.
+    pub fn rename_dir(&mut self, old_rel: &str, new_rel: &str) -> Result<()> {
+        let old_abs = self.abs_path(old_rel)?;
+        let new_abs = self.abs_path(new_rel)?;
+        if !old_abs.is_dir() {
+            anyhow::bail!("không phải thư mục: {old_rel}");
+        }
+        if new_abs.exists() {
+            anyhow::bail!("đích đã tồn tại: {new_rel}");
+        }
+        if let Some(p) = new_abs.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        std::fs::rename(&old_abs, &new_abs)?;
+        self.index()?;
+        Ok(())
+    }
+
     /// "Xóa" = chuyển vào .brain/trash (giữ 90 ngày theo thiết kế, dọn dẹp là việc của janitor).
     pub fn trash_note(&mut self, rel: &str) -> Result<()> {
         let abs = self.abs_path(rel)?;

@@ -5,6 +5,8 @@
 //! chờ user duyệt trong report, `suggest` chỉ hiển thị); không bao giờ xóa thật —
 //! chỉ chuyển vào .brain/trash.
 
+pub mod restructure;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -26,6 +28,10 @@ pub enum Apply {
     FixLink { bad_target: String, new_target: String },
     /// Chuyển note vào .brain/trash.
     TrashNote { path: String },
+    /// Di chuyển note (tầng 2) — rename_note nên wikilink tự cập nhật.
+    MoveNote { from: String, to: String },
+    /// Ghi/cập nhật MOC; phần user viết trên marker được giữ nguyên.
+    WriteMoc { path: String, content: String },
     /// Chỉ thông tin, không có hành động.
     None,
 }
@@ -113,11 +119,11 @@ pub fn snapshot(root: &Path, label: &str) -> Result<bool> {
 
 // ---------- lint rules ----------
 
-struct Finding {
-    rule: &'static str,
-    severity: &'static str,
-    description: String,
-    payload: Apply,
+pub(crate) struct Finding {
+    pub(crate) rule: &'static str,
+    pub(crate) severity: &'static str,
+    pub(crate) description: String,
+    pub(crate) payload: Apply,
 }
 
 fn lint(vault: &Vault, now: i64) -> Result<Vec<Finding>> {
@@ -341,8 +347,70 @@ fn execute(vault: &mut Vault, apply: &Apply) -> Result<String> {
             vault.trash_note(path)?;
             Ok("đã chuyển vào .brain/trash".into())
         }
+        Apply::MoveNote { from, to } => {
+            let n = vault.rename_note(from, to)?;
+            Ok(format!("đã di chuyển, cập nhật {n} link trỏ tới"))
+        }
+        Apply::WriteMoc { path, content } => {
+            let abs = vault.abs_path(path)?;
+            // Giữ nguyên phần user viết tay phía trên marker.
+            let merged = match std::fs::read_to_string(&abs) {
+                Ok(existing) if existing.contains(restructure::MOC_MARKER) => {
+                    let user_part = existing.split(restructure::MOC_MARKER).next().unwrap_or("");
+                    let gen_part = content
+                        .split_once(restructure::MOC_MARKER)
+                        .map(|(_, g)| g)
+                        .unwrap_or(content);
+                    format!("{user_part}{}{gen_part}", restructure::MOC_MARKER)
+                }
+                _ => content.clone(),
+            };
+            std::fs::write(&abs, merged)?;
+            vault.index()?;
+            Ok("đã ghi MOC".into())
+        }
         Apply::None => Ok("không có hành động".into()),
     }
+}
+
+/// Tầng 2 (semantic): chạy SAU `run`, chèn proposals vào lần chạy gần nhất.
+/// Mọi action đều ở mức propose — không tự thực thi.
+pub fn append_semantic(
+    vault: &mut Vault,
+    provider: qa::Provider,
+    sem: &semantic::SemanticIndex,
+) -> Result<Vec<ActionRow>> {
+    ensure_schema(vault)?;
+    let run_id: i64 = vault
+        .db
+        .conn
+        .query_row("SELECT id FROM janitor_run ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+        .context("chưa có janitor run nào — chạy tầng 1 trước")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut findings = restructure::propose_moves(vault, sem, provider, now).unwrap_or_default();
+    findings.extend(restructure::propose_mocs(vault, provider, now).unwrap_or_default());
+
+    let mut rows = Vec::new();
+    for f in findings {
+        vault.db.conn.execute(
+            r#"INSERT INTO janitor_action (run_id, rule, severity, description, status, payload)
+               VALUES (?1, ?2, 'propose', ?3, 'pending', ?4)"#,
+            rusqlite::params![run_id, f.rule, f.description, serde_json::to_string(&f.payload)?],
+        )?;
+        rows.push(ActionRow {
+            id: vault.db.conn.last_insert_rowid(),
+            rule: f.rule.into(),
+            severity: "propose".into(),
+            description: f.description,
+            status: "pending".into(),
+            payload: f.payload,
+        });
+    }
+    Ok(rows)
 }
 
 /// Duyệt một đề xuất đang pending.

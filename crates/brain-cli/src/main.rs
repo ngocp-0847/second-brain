@@ -38,6 +38,9 @@ enum Cmd {
         /// Áp dụng luôn mọi đề xuất (mặc định chỉ đề xuất, duyệt trong app)
         #[arg(long)]
         apply_proposals: bool,
+        /// Chạy thêm tầng 2: LLM đề xuất tái cấu trúc folder + sinh MOC (cần agent CLI + đã embed)
+        #[arg(long)]
+        semantic: bool,
     },
     /// Liệt kê note đang link tới NOTE (đường dẫn hoặc title)
     Backlinks { note: String },
@@ -195,13 +198,29 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Janitor { apply_proposals } => {
-            let report = janitor::run(&mut vault)?;
+        Cmd::Janitor { apply_proposals, semantic: run_semantic } => {
+            let mut report = janitor::run(&mut vault)?;
             println!(
                 "Janitor run #{} — snapshot: {}",
                 report.run_id,
                 if report.snapshotted { "✓ (git)" } else { "✗ (không có git!)" }
             );
+            if run_semantic {
+                match qa::detect_provider() {
+                    Some(provider) => {
+                        let idx =
+                            semantic::SemanticIndex::open(&root.join(".brain").join("cache.db"))?;
+                        if idx.vector_count()? == 0 {
+                            eprintln!("(tầng 2 bỏ qua: chưa embed — chạy `brain embed` trước)");
+                        } else {
+                            eprintln!("Tầng 2: đang hỏi {}…", provider.name());
+                            let rows = janitor::append_semantic(&mut vault, provider, &idx)?;
+                            report.proposals.extend(rows);
+                        }
+                    }
+                    None => eprintln!("(tầng 2 bỏ qua: không có agent CLI trên PATH)"),
+                }
+            }
             if !report.applied.is_empty() {
                 println!("\nĐã tự sửa ({}):", report.applied.len());
                 for a in &report.applied {

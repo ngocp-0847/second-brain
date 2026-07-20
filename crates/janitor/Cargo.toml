@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 vault-core = { path = "../vault-core" }
+semantic = { path = "../semantic" }
+qa = { path = "../qa" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
