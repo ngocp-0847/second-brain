@@ -4177,6 +4177,7 @@ dependencies = [
  "janitor",
  "portable-pty",
  "qa",
+ "rusqlite",
  "semantic",
  "serde",
  "serde_json",

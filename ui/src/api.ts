@@ -76,6 +76,8 @@ export const api = {
   importAsset: (src: string) => invoke<string>("import_asset", { src }),
   readAsset: (path: string) => invoke<string>("read_asset", { path }),
   gitSync: () => invoke<string>("git_sync"),
+  noteHistory: (path: string) => invoke<RevisionMeta[]>("note_history", { path }),
+  historyGet: (id: number) => invoke<string>("history_get", { id }),
   agentChat: (message: string, contextPath: string | null, sessionId: string | null) =>
     invoke<AgentReply>("agent_chat", { message, contextPath, sessionId }),
   termOpen: (cols: number, rows: number) => invoke<number>("term_open", { cols, rows }),
@@ -89,6 +91,12 @@ export interface AgentReply {
   text: string;
   session_id: string | null;
   provider: string;
+}
+
+export interface RevisionMeta {
+  id: number;
+  ts: number;
+  chars: number;
 }
 
 export interface GraphData {
