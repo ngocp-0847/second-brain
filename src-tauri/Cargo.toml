@@ -23,5 +23,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
 base64 = "0.22"
+rusqlite = { workspace = true }
 portable-pty = "0.9"
 wait-timeout = "0.2"

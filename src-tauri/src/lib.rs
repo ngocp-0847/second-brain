@@ -3,6 +3,7 @@
 
 mod agent;
 mod git;
+mod history;
 mod semantic_worker;
 mod terminal;
 
@@ -20,6 +21,18 @@ struct AppState {
     worker: Mutex<Option<SemanticWorker>>,
     /// "auto" | "claude" | "codex"
     llm_pref: Mutex<String>,
+    /// Revision history (.brain/history.db) — best-effort, lỗi không chặn thao tác note.
+    history: Mutex<Option<history::History>>,
+}
+
+/// Chạy thao tác history best-effort: chưa mở vault / lỗi DB → bỏ qua trong im lặng.
+fn with_history<T>(
+    state: &State<AppState>,
+    f: impl FnOnce(&history::History) -> anyhow::Result<T>,
+) -> Option<T> {
+    let guard = state.history.lock().ok()?;
+    let h = guard.as_ref()?;
+    f(h).ok()
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -125,6 +138,7 @@ fn open_vault(path: String, app: AppHandle, state: State<AppState>) -> CmdResult
     let stats = vault.index().map_err(err)?;
     let info = vault_info(&mut vault, stats.duration_ms).map_err(err)?;
     let cache_db = vault.root.join(".brain").join("cache.db");
+    *state.history.lock().map_err(err)? = history::History::open(&vault.root.join(".brain")).ok();
     *state.vault.lock().map_err(err)? = Some(vault);
 
     let worker = SemanticWorker::spawn(cache_db, app);
@@ -143,10 +157,14 @@ fn refresh(state: State<AppState>) -> CmdResult<VaultInfo> {
 
 #[tauri::command]
 fn read_note(path: String, state: State<AppState>) -> CmdResult<String> {
-    with_vault(&state, |v| {
+    let content = with_vault(&state, |v| {
         let abs = v.abs_path(&path)?;
         Ok(std::fs::read_to_string(abs)?)
-    })
+    })?;
+    // Nội dung trên đĩa khác bản app biết (agent AI / tool ngoài vừa sửa)
+    // → bản cũ vào revision ngay (force).
+    with_history(&state, |h| h.track(&path, &content, true));
+    Ok(content)
 }
 
 #[tauri::command]
@@ -156,10 +174,12 @@ fn write_note(path: String, content: String, state: State<AppState>) -> CmdResul
         if let Some(dir) = abs.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(abs, content)?;
+        std::fs::write(abs, &content)?;
         v.index()?;
         Ok(())
     })?;
+    // Bản trước save vào revision theo interval gộp 2 phút (kiểu Obsidian).
+    with_history(&state, |h| h.track(&path, &content, false));
     send_job(&state, Job::Sync);
     Ok(())
 }
@@ -266,13 +286,39 @@ fn rename_folder(from: String, to: String, state: State<AppState>) -> CmdResult<
 #[tauri::command]
 fn rename_note(from: String, to: String, state: State<AppState>) -> CmdResult<usize> {
     let n = with_vault(&state, |v| v.rename_note(&from, &to))?;
+    // Mang lịch sử revision theo path mới (chuẩn hóa giống UI: thêm .md, / thay \).
+    let to_norm = {
+        let t = to.trim().replace('\\', "/");
+        if t.to_lowercase().ends_with(".md") { t } else { format!("{t}.md") }
+    };
+    with_history(&state, |h| h.rename(&from, &to_norm));
     send_job(&state, Job::Sync);
     Ok(n)
 }
 
 #[tauri::command]
 fn trash_note(path: String, state: State<AppState>) -> CmdResult<()> {
+    // Snapshot nội dung trước khi vào thùng rác — xóa nhầm vẫn cứu được từ 🕘.
+    let content = with_vault(&state, |v| {
+        let abs = v.abs_path(&path)?;
+        Ok(std::fs::read_to_string(abs).unwrap_or_default())
+    });
+    if let Ok(c) = content {
+        with_history(&state, |h| h.track(&path, &c, true));
+    }
     with_vault(&state, |v| v.trash_note(&path))
+}
+
+/// Danh sách revision của một note (mới nhất trước).
+#[tauri::command]
+fn note_history(path: String, state: State<AppState>) -> CmdResult<Vec<history::RevisionMeta>> {
+    with_history(&state, |h| h.list(&path)).ok_or_else(|| "chưa mở vault".to_string())
+}
+
+/// Nội dung đầy đủ của một revision.
+#[tauri::command]
+fn history_get(id: i64, state: State<AppState>) -> CmdResult<String> {
+    with_history(&state, |h| h.get(id)).ok_or_else(|| "không tìm thấy revision".to_string())
 }
 
 /// Hybrid search: BM25 + vector, trộn bằng RRF. Vector chưa sẵn sàng → thuần BM25.
@@ -418,6 +464,8 @@ fn agent_chat(
     let provider = qa::provider_from_pref(&pref)
         .ok_or("không tìm thấy Claude Code CLI hoặc Codex CLI trên PATH (kiểm tra Settings ⚙)")?;
     let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    // Lưới an toàn: git snapshot cả vault trước khi cho agent sửa file.
+    let _ = janitor::snapshot(&root, "agent");
     agent::chat(&app, provider, &root, &message, context_path.as_deref(), session_id.as_deref())
         .map_err(err)
 }
@@ -662,6 +710,8 @@ pub fn run() {
             set_llm_pref,
             git_sync,
             agent_chat,
+            note_history,
+            history_get,
             term_open,
             term_write,
             term_resize,

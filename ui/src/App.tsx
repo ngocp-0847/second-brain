@@ -16,6 +16,7 @@ import {
   type LlmSettings,
   type NoteMeta,
   type RelatedNote,
+  type RevisionMeta,
   type SearchHit,
   type Stats,
 } from "./api";
@@ -79,6 +80,12 @@ export default function App() {
   const [janitorReport, setJanitorReport] = createSignal<JanitorReport | null>(null);
   const [janitorBusy, setJanitorBusy] = createSignal(false);
   const [janitorBadge, setJanitorBadge] = createSignal(false);
+
+  // Revision history (🕘) của note đang mở
+  const [historyOpen, setHistoryOpen] = createSignal(false);
+  const [revs, setRevs] = createSignal<RevisionMeta[]>([]);
+  const [revSel, setRevSel] = createSignal<number | null>(null);
+  const [revContent, setRevContent] = createSignal("");
 
   // Agent chat sidebar + terminal panel + git sync + panel phải (backlinks)
   const [chatOpen, setChatOpen] = createSignal(localStorage.getItem("chatOpen") === "1");
@@ -578,7 +585,8 @@ export default function App() {
     }
   };
 
-  /** Agent vừa sửa vault xong: re-index, reload note đang mở nếu nội dung đổi trên đĩa. */
+  /** Agent vừa sửa vault xong: re-index, reload note đang mở nếu nội dung đổi trên đĩa.
+   *  Dùng updateContent để GIỮ undo history → Ctrl+Z revert được thay đổi của agent. */
   const vaultChanged = async () => {
     try {
       applyInfo(await api.refresh());
@@ -586,12 +594,62 @@ export default function App() {
       const p = currentPath;
       if (p) {
         const content = await api.readNote(p);
-        editor.setContent(content);
+        editor.updateContent(content);
         loadPanels(p);
       }
     } catch (e) {
       say(String(e));
     }
+  };
+
+  /** Mở modal 🕘 lịch sử phiên bản của note đang mở. */
+  const openHistory = async () => {
+    const p = current();
+    if (!p) return;
+    setHistoryOpen(true);
+    setRevSel(null);
+    setRevContent("");
+    try {
+      setRevs(await api.noteHistory(p));
+    } catch (e) {
+      say(String(e));
+      setRevs([]);
+    }
+  };
+
+  const pickRev = async (id: number) => {
+    setRevSel(id);
+    try {
+      setRevContent(await api.historyGet(id));
+    } catch (e) {
+      setRevContent(String(e));
+    }
+  };
+
+  /** Khôi phục revision: áp vào editor dạng transaction (Ctrl+Z quay lại được) + lưu. */
+  const restoreRev = async () => {
+    const p = current();
+    const id = revSel();
+    if (!p || id == null) return;
+    try {
+      const content = await api.historyGet(id);
+      editor.updateContent(content);
+      await api.writeNote(p, content);
+      applyInfo(await api.refresh());
+      loadPanels(p);
+      setHistoryOpen(false);
+      say("Đã khôi phục phiên bản cũ (Ctrl+Z để quay lại bản trước đó)");
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  const fmtTs = (ts: number) => {
+    const d = new Date(ts * 1000);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    const time = d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+    return sameDay ? `${time} hôm nay` : `${time} · ${d.toLocaleDateString("vi-VN")}`;
   };
 
   const openSettings = async () => {
@@ -726,6 +784,7 @@ export default function App() {
         setPromptCfg(null);
         setSettingsOpen(false);
         setJanitorOpen(false);
+        setHistoryOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -838,6 +897,7 @@ export default function App() {
             {view() === "graph" ? "🕸 Graph view" : view() === "canvas" ? `🧩 ${canvasPath() ?? ""}` : current() ?? ""}
           </span>
           <Show when={view() === "editor" && current()}>
+            <button title="Lịch sử phiên bản (mọi thay đổi của bạn & AI)" onClick={openHistory}>🕘</button>
             <button title="Đổi tên / di chuyển" onClick={renameCurrent}>✎</button>
             <button title="Chuyển vào thùng rác" onClick={trashCurrent}>🗑</button>
           </Show>
@@ -1151,6 +1211,50 @@ export default function App() {
                 >
                   <div class="ask-hint">Vault sạch sẽ, không có gì để làm 🎉</div>
                 </Show>
+              </Show>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={historyOpen()}>
+        <div class="overlay" onClick={() => setHistoryOpen(false)}>
+          <div class="prompt-modal history-modal" onClick={(e) => e.stopPropagation()}>
+            <div class="prompt-title">🕘 Lịch sử phiên bản — {current()}</div>
+            <div class="history-body">
+              <Show
+                when={revs().length > 0}
+                fallback={
+                  <div class="ask-hint">
+                    Chưa có phiên bản cũ nào — revision được tạo khi note thay đổi (bạn sửa, AI sửa, hay tool ngoài).
+                  </div>
+                }
+              >
+                <div class="history-list">
+                  <For each={revs()}>
+                    {(r) => (
+                      <div
+                        class="history-item"
+                        classList={{ selected: revSel() === r.id }}
+                        onClick={() => pickRev(r.id)}
+                      >
+                        <div class="history-time">{fmtTs(r.ts)}</div>
+                        <div class="history-meta">{r.chars} ký tự</div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+                <div class="history-preview">
+                  <Show
+                    when={revSel() != null}
+                    fallback={<div class="ask-hint">Chọn một phiên bản để xem trước</div>}
+                  >
+                    <pre class="history-content">{revContent()}</pre>
+                    <button class="ask-save" onClick={restoreRev}>
+                      ↩ Khôi phục bản này
+                    </button>
+                  </Show>
+                </div>
               </Show>
             </div>
           </div>

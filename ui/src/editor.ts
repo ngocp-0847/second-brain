@@ -39,6 +39,9 @@ import type { NoteMeta } from "./api";
 export interface EditorHandle {
   view: EditorView;
   setContent(text: string): void;
+  /** Thay nội dung nhưng GIỮ undo history (mở lại cùng file sau khi agent/tool ngoài
+   *  sửa) — Ctrl+Z revert được thay đổi đó, giống Obsidian. */
+  updateContent(text: string): void;
   getContent(): string;
   /** Lưu ngay nếu đang có thay đổi chưa flush. */
   flush(): void;
@@ -360,6 +363,13 @@ export function createEditor(opts: EditorOpts): EditorHandle {
     setContent(text) {
       suppress = true;
       view.setState(makeState(text));
+      suppress = false;
+      dirty = false;
+    },
+    updateContent(text) {
+      if (text === view.state.doc.toString()) return;
+      suppress = true;
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
       suppress = false;
       dirty = false;
     },
