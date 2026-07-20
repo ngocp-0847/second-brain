@@ -98,6 +98,44 @@ impl SemanticIndex {
         Ok(SemanticIndex { conn })
     }
 
+    /// Vector trung bình của từng note (note_id → avg các chunk vector).
+    /// Dùng cho janitor tầng 2 (phát hiện note đặt sai folder).
+    pub fn note_vectors(&self) -> Result<Vec<(i64, Vec<f32>)>> {
+        let rows: Vec<(i64, Vec<u8>)> = {
+            let mut stmt = self.conn.prepare(
+                r#"SELECT c.note_id, v.embedding FROM chunk_vec v
+                   JOIN chunk c ON c.id = v.chunk_id ORDER BY c.note_id"#,
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut out: Vec<(i64, Vec<f32>)> = Vec::new();
+        let mut counts: Vec<usize> = Vec::new();
+        for (note_id, blob) in rows {
+            let v = blob_to_vec(&blob);
+            match out.last_mut() {
+                Some((id, acc)) if *id == note_id => {
+                    for (a, x) in acc.iter_mut().zip(v) {
+                        *a += x;
+                    }
+                    *counts.last_mut().unwrap() += 1;
+                }
+                _ => {
+                    out.push((note_id, v));
+                    counts.push(1);
+                }
+            }
+        }
+        for ((_, acc), n) in out.iter_mut().zip(counts) {
+            for a in acc.iter_mut() {
+                *a /= n as f32;
+            }
+        }
+        Ok(out)
+    }
+
     /// Tổng số vector đang có trong index.
     pub fn vector_count(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM chunk_vec", [], |r| r.get(0))?)

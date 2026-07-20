@@ -1,7 +1,10 @@
 //! Tauri shell: expose vault-core cho UI qua các command.
 //! WebView chỉ render; mọi việc nặng (parse/index/search/refactor) chạy ở đây.
 
+mod agent;
+mod git;
 mod semantic_worker;
+mod terminal;
 
 use semantic_worker::{Job, SemanticWorker};
 use serde::Serialize;
@@ -25,6 +28,17 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// Không cho cửa sổ console nháy lên khi app GUI spawn process con (git, agent CLI).
+#[cfg(windows)]
+pub(crate) fn hide_console(c: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    c.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn hide_console(_c: &mut std::process::Command) {}
+
 #[derive(Serialize)]
 struct NoteMeta {
     path: String,
@@ -35,6 +49,7 @@ struct NoteMeta {
 struct VaultInfo {
     root: String,
     notes: Vec<NoteMeta>,
+    dirs: Vec<String>,
     stats: Stats,
 }
 
@@ -94,9 +109,12 @@ fn vault_info(vault: &mut Vault, index_ms: u128) -> anyhow::Result<VaultInfo> {
         .map(|(path, title)| NoteMeta { path, title })
         .collect();
     let (n, l, b, t, c) = vault.db.stats()?;
+    let mut dirs = vault.list_dirs();
+    dirs.sort();
     Ok(VaultInfo {
         root: vault.root.to_string_lossy().into_owned(),
         notes,
+        dirs,
         stats: Stats { notes: n, links: l, broken: b, tags: t, chunks: c, index_ms },
     })
 }
@@ -168,6 +186,81 @@ fn create_note(path: String, state: State<AppState>) -> CmdResult<String> {
         v.index()?;
         Ok(rel)
     })
+}
+
+/// Đường dẫn assets/<name> chưa bị chiếm (trùng thì thêm hậu tố số).
+fn unique_asset_path(root: &std::path::Path, name: &str) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let name = name.replace(['/', '\\'], "_");
+    std::fs::create_dir_all(root.join("assets"))?;
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), "png"));
+    let mut rel = format!("assets/{stem}.{ext}");
+    let mut i = 1;
+    while root.join(&rel).exists() {
+        rel = format!("assets/{stem} {i}.{ext}");
+        i += 1;
+    }
+    let abs = root.join(&rel);
+    Ok((rel, abs))
+}
+
+/// Lưu ảnh dán từ clipboard (base64) vào assets/ của vault, trả về path tương đối.
+#[tauri::command]
+fn save_asset(name: String, data_base64: String, state: State<AppState>) -> CmdResult<String> {
+    use base64::Engine;
+    with_vault(&state, |v| {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&data_base64)?;
+        let (rel, abs) = unique_asset_path(&v.root, &name)?;
+        std::fs::write(abs, bytes)?;
+        Ok(rel)
+    })
+}
+
+/// Copy một file ngoài vault (chọn qua dialog) vào assets/, trả về path tương đối.
+#[tauri::command]
+fn import_asset(src: String, state: State<AppState>) -> CmdResult<String> {
+    with_vault(&state, |v| {
+        let name = std::path::Path::new(&src)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("đường dẫn không hợp lệ: {src}"))?;
+        let (rel, abs) = unique_asset_path(&v.root, name)?;
+        std::fs::copy(&src, abs)?;
+        Ok(rel)
+    })
+}
+
+/// Đọc file nhị phân trong vault dưới dạng base64 (hiển thị ảnh trong canvas).
+#[tauri::command]
+fn read_asset(path: String, state: State<AppState>) -> CmdResult<String> {
+    use base64::Engine;
+    with_vault(&state, |v| {
+        let abs = v.abs_path(&path)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(std::fs::read(abs)?))
+    })
+}
+
+#[tauri::command]
+fn create_folder(path: String, state: State<AppState>) -> CmdResult<String> {
+    with_vault(&state, |v| {
+        let rel = path.replace('\\', "/");
+        let rel = rel.trim_matches('/').to_string();
+        if rel.is_empty() {
+            anyhow::bail!("tên thư mục rỗng");
+        }
+        let abs = v.abs_path(&rel)?;
+        if abs.exists() {
+            anyhow::bail!("đã tồn tại: {rel}");
+        }
+        std::fs::create_dir_all(&abs)?;
+        Ok(rel)
+    })
+}
+
+#[tauri::command]
+fn rename_folder(from: String, to: String, state: State<AppState>) -> CmdResult<()> {
+    with_vault(&state, |v| v.rename_dir(&from, &to))?;
+    send_job(&state, Job::Sync);
+    Ok(())
 }
 
 #[tauri::command]
@@ -305,11 +398,90 @@ fn ask_vault(question: String, state: State<AppState>) -> CmdResult<AnswerDto> {
     })
 }
 
+/// Sync GitHub: add → commit → push trong vault (chạy git CLI).
 #[tauri::command(async)]
-fn janitor_run(state: State<AppState>) -> CmdResult<janitor::Report> {
+fn git_sync(state: State<AppState>) -> CmdResult<String> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    git::sync(&root).map_err(err)
+}
+
+/// Chat với agent (Claude Code / Codex headless, cwd = vault) — agent được phép sửa file.
+#[tauri::command(async)]
+fn agent_chat(
+    message: String,
+    context_path: Option<String>,
+    session_id: Option<String>,
+    app: AppHandle,
+    state: State<AppState>,
+) -> CmdResult<agent::AgentReply> {
+    let pref = state.llm_pref.lock().map_err(err)?.clone();
+    let provider = qa::provider_from_pref(&pref)
+        .ok_or("không tìm thấy Claude Code CLI hoặc Codex CLI trên PATH (kiểm tra Settings ⚙)")?;
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    agent::chat(&app, provider, &root, &message, context_path.as_deref(), session_id.as_deref())
+        .map_err(err)
+}
+
+#[tauri::command]
+fn term_open(
+    cols: u16,
+    rows: u16,
+    app: AppHandle,
+    state: State<AppState>,
+    term: State<terminal::TermState>,
+) -> CmdResult<u32> {
+    let cwd = state.vault.lock().ok().and_then(|g| g.as_ref().map(|v| v.root.clone()));
+    let run_claude = qa::provider_available(qa::Provider::ClaudeCli);
+    terminal::open(app, &term, cwd, cols, rows, run_claude).map_err(err)
+}
+
+#[tauri::command]
+fn term_write(id: u32, data: String, term: State<terminal::TermState>) -> CmdResult<()> {
+    terminal::write(&term, id, &data).map_err(err)
+}
+
+#[tauri::command]
+fn term_resize(id: u32, cols: u16, rows: u16, term: State<terminal::TermState>) -> CmdResult<()> {
+    terminal::resize(&term, id, cols, rows).map_err(err)
+}
+
+#[tauri::command]
+fn term_kill(id: u32, term: State<terminal::TermState>) -> CmdResult<()> {
+    terminal::kill(&term, id);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn janitor_run(app: AppHandle, state: State<AppState>) -> CmdResult<janitor::Report> {
     let report = with_vault(&state, |v| janitor::run(v))?;
     send_job(&state, Job::Sync);
+    let pref = state.llm_pref.lock().map_err(err)?.clone();
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    spawn_janitor_tier2(app, root, pref);
     Ok(report)
+}
+
+/// Tầng 2 (LLM restructure + MOC) chạy nền với Vault connection riêng —
+/// không giữ lock của app trong lúc chờ agent CLI (có thể cả phút).
+fn spawn_janitor_tier2(app: AppHandle, root: std::path::PathBuf, pref: String) {
+    use tauri::Emitter;
+    let Some(provider) = qa::provider_from_pref(&pref) else { return };
+    std::thread::spawn(move || {
+        let Ok(mut vault) = Vault::open(&root) else { return };
+        let Ok(sem) = semantic::SemanticIndex::open(&root.join(".brain").join("cache.db")) else {
+            return;
+        };
+        if sem.vector_count().unwrap_or(0) == 0 {
+            return;
+        }
+        if let Ok(rows) = janitor::append_semantic(&mut vault, provider, &sem) {
+            if !rows.is_empty() {
+                if let Ok(Some(r)) = janitor::latest_report(&vault) {
+                    let _ = app.emit("janitor-report-ready", &r);
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -351,10 +523,13 @@ fn spawn_nightly_janitor(app: AppHandle) {
             if !due {
                 continue;
             }
-            janitor::run(v)
+            (janitor::run(v), v.root.clone())
         };
+        let (report, root) = report;
         if let Ok(r) = report {
             let _ = app.emit("janitor-report-ready", &r);
+            let pref = state.llm_pref.lock().map(|g| g.clone()).unwrap_or_default();
+            spawn_janitor_tier2(app.clone(), root, pref);
         }
     });
 }
@@ -466,12 +641,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(terminal::TermState::default())
         .invoke_handler(tauri::generate_handler![
             open_vault,
             refresh,
             read_note,
             write_note,
             create_note,
+            create_folder,
+            rename_folder,
             rename_note,
             trash_note,
             search_notes,
@@ -482,12 +660,21 @@ pub fn run() {
             ask_vault,
             get_llm_settings,
             set_llm_pref,
+            git_sync,
+            agent_chat,
+            term_open,
+            term_write,
+            term_resize,
+            term_kill,
             janitor_run,
             janitor_latest,
             janitor_apply,
             janitor_dismiss,
             graph_data,
-            list_canvases
+            list_canvases,
+            save_asset,
+            import_asset,
+            read_asset
         ])
         .setup(|app| {
             spawn_nightly_janitor(app.handle().clone());

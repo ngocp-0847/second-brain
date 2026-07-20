@@ -1,15 +1,21 @@
-// Cây thư mục dựng từ danh sách path phẳng của vault.
+// Cây thư mục dựng từ danh sách path phẳng của vault (kèm folder rỗng từ dirs).
 import { createMemo, For, Show } from "solid-js";
 import type { NoteMeta } from "./api";
 
+export interface TreeEditing {
+  path: string;
+  kind: "note" | "dir";
+}
+
 interface DirNode {
   name: string;
+  path: string;
   dirs: DirNode[];
   files: NoteMeta[];
 }
 
-function buildTree(notes: NoteMeta[]): DirNode {
-  const root: DirNode = { name: "", dirs: [], files: [] };
+function buildTree(notes: NoteMeta[], dirs: string[]): DirNode {
+  const root: DirNode = { name: "", path: "", dirs: [], files: [] };
   const dirMap = new Map<string, DirNode>([["", root]]);
 
   const getDir = (path: string): DirNode => {
@@ -17,12 +23,13 @@ function buildTree(notes: NoteMeta[]): DirNode {
     if (found) return found;
     const idx = path.lastIndexOf("/");
     const parent = getDir(idx >= 0 ? path.slice(0, idx) : "");
-    const node: DirNode = { name: path.slice(idx + 1), dirs: [], files: [] };
+    const node: DirNode = { name: path.slice(idx + 1), path, dirs: [], files: [] };
     parent.dirs.push(node);
     dirMap.set(path, node);
     return node;
   };
 
+  for (const d of dirs) getDir(d);
   for (const n of notes) {
     const idx = n.path.lastIndexOf("/");
     getDir(idx >= 0 ? n.path.slice(0, idx) : "").files.push(n);
@@ -40,15 +47,60 @@ function fileName(path: string) {
   return path.split("/").pop()!.replace(/\.md$/i, "");
 }
 
-function Dir(props: { node: DirNode; current: string | null; onOpen: (p: string) => void }) {
+/** Ô nhập tên inline khi vừa tạo note/folder: Enter/blur xác nhận, Esc giữ tên hiện tại. */
+function RenameInput(props: { value: string; onCommit: (v: string) => void }) {
+  let committed = false;
+  const commit = (v: string) => {
+    if (committed) return;
+    committed = true;
+    props.onCommit(v);
+  };
+  return (
+    <input
+      class="tree-rename"
+      value={props.value}
+      ref={(el) => queueMicrotask(() => { el.focus(); el.select(); })}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit(e.currentTarget.value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          commit(props.value);
+        }
+      }}
+      onBlur={(e) => commit(e.currentTarget.value)}
+      onClick={(e) => e.stopPropagation()}
+    />
+  );
+}
+
+interface DirProps {
+  node: DirNode;
+  current: string | null;
+  editing: TreeEditing | null;
+  onOpen: (p: string) => void;
+  onOpenNewTab?: (p: string) => void;
+  onRename: (v: string) => void;
+}
+
+function Dir(props: DirProps) {
   return (
     <>
       <For each={props.node.dirs}>
         {(d) => (
           <details open>
-            <summary class="tree-dir">{d.name}</summary>
+            <summary class="tree-dir">
+              <Show
+                when={props.editing?.kind === "dir" && props.editing.path === d.path}
+                fallback={d.name}
+              >
+                <RenameInput value={d.name} onCommit={props.onRename} />
+              </Show>
+            </summary>
             <div class="tree-indent">
-              <Dir node={d} current={props.current} onOpen={props.onOpen} />
+              <Dir {...props} node={d} />
             </div>
           </details>
         )}
@@ -58,10 +110,20 @@ function Dir(props: { node: DirNode; current: string | null; onOpen: (p: string)
           <div
             class="tree-file"
             classList={{ active: props.current === f.path }}
-            onClick={() => props.onOpen(f.path)}
+            onClick={(e) =>
+              e.ctrlKey && props.onOpenNewTab
+                ? props.onOpenNewTab(f.path)
+                : props.onOpen(f.path)
+            }
+            onAuxClick={(e) => e.button === 1 && props.onOpenNewTab?.(f.path)}
             title={f.path}
           >
-            {fileName(f.path)}
+            <Show
+              when={props.editing?.kind === "note" && props.editing.path === f.path}
+              fallback={fileName(f.path)}
+            >
+              <RenameInput value={fileName(f.path)} onCommit={props.onRename} />
+            </Show>
           </div>
         )}
       </For>
@@ -71,9 +133,13 @@ function Dir(props: { node: DirNode; current: string | null; onOpen: (p: string)
 
 export function Tree(props: {
   notes: NoteMeta[];
+  dirs: string[];
   filter: string;
   current: string | null;
+  editing: TreeEditing | null;
   onOpen: (p: string) => void;
+  onOpenNewTab?: (p: string) => void;
+  onRename: (v: string) => void;
 }) {
   const filtered = createMemo(() => {
     const q = props.filter.trim().toLowerCase();
@@ -82,14 +148,24 @@ export function Tree(props: {
       (n) => n.path.toLowerCase().includes(q) || n.title.toLowerCase().includes(q),
     );
   });
-  const tree = createMemo(() => buildTree(filtered()));
+  // Khi đang lọc thì ẩn folder rỗng cho gọn.
+  const tree = createMemo(() =>
+    buildTree(filtered(), props.filter.trim() ? [] : props.dirs),
+  );
 
   return (
     <div class="tree">
-      <Show when={filtered().length === 0}>
+      <Show when={filtered().length === 0 && props.dirs.length === 0}>
         <div class="tree-empty">Không có note nào</div>
       </Show>
-      <Dir node={tree()} current={props.current} onOpen={props.onOpen} />
+      <Dir
+        node={tree()}
+        current={props.current}
+        editing={props.editing}
+        onOpen={props.onOpen}
+        onOpenNewTab={props.onOpenNewTab}
+        onRename={props.onRename}
+      />
     </div>
   );
 }
