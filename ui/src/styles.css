@@ -831,6 +831,21 @@ details[open] > .tree-dir::before {
   line-height: 1.5;
 }
 
+.canvas-link {
+  color: var(--link);
+  cursor: pointer;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.canvas-link:hover {
+  text-decoration: underline;
+}
+
+.canvas-link-wiki {
+  color: var(--accent);
+}
+
 .canvas-img {
   width: 100%;
   height: 100%;
