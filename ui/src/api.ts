@@ -17,6 +17,7 @@ export interface Stats {
 export interface VaultInfo {
   root: string;
   notes: NoteMeta[];
+  dirs: string[];
   stats: Stats;
 }
 
@@ -47,6 +48,9 @@ export const api = {
   writeNote: (path: string, content: string) =>
     invoke<void>("write_note", { path, content }),
   createNote: (path: string) => invoke<string>("create_note", { path }),
+  createFolder: (path: string) => invoke<string>("create_folder", { path }),
+  renameFolder: (from: string, to: string) =>
+    invoke<void>("rename_folder", { from, to }),
   renameNote: (from: string, to: string) =>
     invoke<number>("rename_note", { from, to }),
   trashNote: (path: string) => invoke<void>("trash_note", { path }),
@@ -67,7 +71,25 @@ export const api = {
   janitorDismiss: (actionId: number) => invoke<void>("janitor_dismiss", { actionId }),
   graphData: () => invoke<GraphData>("graph_data"),
   listCanvases: () => invoke<string[]>("list_canvases"),
+  saveAsset: (name: string, dataBase64: string) =>
+    invoke<string>("save_asset", { name, dataBase64 }),
+  importAsset: (src: string) => invoke<string>("import_asset", { src }),
+  readAsset: (path: string) => invoke<string>("read_asset", { path }),
+  gitSync: () => invoke<string>("git_sync"),
+  agentChat: (message: string, contextPath: string | null, sessionId: string | null) =>
+    invoke<AgentReply>("agent_chat", { message, contextPath, sessionId }),
+  termOpen: (cols: number, rows: number) => invoke<number>("term_open", { cols, rows }),
+  termWrite: (id: number, data: string) => invoke<void>("term_write", { id, data }),
+  termResize: (id: number, cols: number, rows: number) =>
+    invoke<void>("term_resize", { id, cols, rows }),
+  termKill: (id: number) => invoke<void>("term_kill", { id }),
 };
+
+export interface AgentReply {
+  text: string;
+  session_id: string | null;
+  provider: string;
+}
 
 export interface GraphData {
   nodes: { path: string; title: string; degree: number }[];

@@ -20,21 +20,33 @@ import {
   type Stats,
 } from "./api";
 import { CanvasView } from "./canvas";
+import { ChatPanel } from "./chat";
 import { createEditor, type EditorHandle } from "./editor";
 import { GraphView } from "./graph";
-import { Tree } from "./tree";
+import { TermPanel } from "./terminal";
+import { Tree, type TreeEditing } from "./tree";
 
 type View = "editor" | "graph" | "canvas";
+
+/** Một tab của khu vực chính: note, graph, canvas hoặc trống ("New tab"). */
+interface TabState {
+  id: number;
+  kind: "empty" | "note" | "graph" | "canvas";
+  /** note: path .md · canvas: path .canvas · graph: giữ path cũ để toggle quay lại. */
+  path: string | null;
+}
 
 export default function App() {
   const [root, setRoot] = createSignal<string | null>(null);
   const [notes, setNotes] = createSignal<NoteMeta[]>([]);
+  const [dirs, setDirs] = createSignal<string[]>([]);
+  // Note/folder vừa tạo đang chờ đặt tên inline trong tree.
+  const [treeEditing, setTreeEditing] = createSignal<TreeEditing | null>(null);
   const [stats, setStats] = createSignal<Stats | null>(null);
   const [current, setCurrent] = createSignal<string | null>(null);
   const [backlinks, setBacklinks] = createSignal<Backlink[]>([]);
   const [related, setRelated] = createSignal<RelatedNote[]>([]);
   const [mentions, setMentions] = createSignal<SearchHit[]>([]);
-  const [filter, setFilter] = createSignal("");
   const [status, setStatus] = createSignal("");
   const [semStatus, setSemStatus] = createSignal("");
 
@@ -50,10 +62,15 @@ export default function App() {
   const [askedQuestion, setAskedQuestion] = createSignal("");
   const isAskMode = () => omniQuery().trimStart().startsWith("?");
 
-  // View chính: editor / graph / canvas
+  // View chính: editor / graph / canvas (phản ánh tab đang active)
   const [view, setView] = createSignal<View>("editor");
   const [canvasPath, setCanvasPath] = createSignal<string | null>(null);
   const [canvases, setCanvases] = createSignal<string[]>([]);
+
+  // Tabs: mở nhiều note/graph/canvas song song, mỗi tab một trạng thái riêng.
+  const [tabs, setTabs] = createSignal<TabState[]>([{ id: 1, kind: "empty", path: null }]);
+  const [activeId, setActiveId] = createSignal(1);
+  let nextTabId = 2;
 
   // Settings + Janitor
   const [settingsOpen, setSettingsOpen] = createSignal(false);
@@ -62,6 +79,11 @@ export default function App() {
   const [janitorReport, setJanitorReport] = createSignal<JanitorReport | null>(null);
   const [janitorBusy, setJanitorBusy] = createSignal(false);
   const [janitorBadge, setJanitorBadge] = createSignal(false);
+
+  // Agent chat sidebar + terminal panel + git sync
+  const [chatOpen, setChatOpen] = createSignal(localStorage.getItem("chatOpen") === "1");
+  const [termVisible, setTermVisible] = createSignal(false);
+  const [syncBusy, setSyncBusy] = createSignal(false);
 
   // Modal nhập text (thay window.prompt vốn không chạy trong WebView)
   const [promptCfg, setPromptCfg] = createSignal<{
@@ -80,9 +102,10 @@ export default function App() {
     setTimeout(() => setStatus((s) => (s === msg ? "" : s)), 4000);
   };
 
-  const applyInfo = (info: { root: string; notes: NoteMeta[]; stats: Stats }) => {
+  const applyInfo = (info: { root: string; notes: NoteMeta[]; dirs: string[]; stats: Stats }) => {
     setRoot(info.root);
     setNotes(info.notes);
+    setDirs(info.dirs ?? []);
     setStats(info.stats);
   };
 
@@ -108,6 +131,10 @@ export default function App() {
     setRelated(await api.relatedNotes(path).catch(() => []));
   };
 
+  const activeTab = () => tabs().find((t) => t.id === activeId()) ?? tabs()[0];
+  const updateTab = (id: number, patch: Partial<TabState>) =>
+    setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+
   const openNote = async (path: string) => {
     if (currentPath) editor.flush();
     try {
@@ -117,6 +144,7 @@ export default function App() {
       setView("editor");
       editor.setContent(content);
       loadPanels(path);
+      updateTab(activeId(), { kind: "note", path });
     } catch (e) {
       say(String(e));
     }
@@ -124,9 +152,120 @@ export default function App() {
 
   const openCanvas = (path: string) => {
     if (currentPath) editor.flush();
+    currentPath = null;
+    setCurrent(null);
     setCanvasPath(path);
     setView("canvas");
+    updateTab(activeId(), { kind: "canvas", path });
   };
+
+  /** Đồng bộ khu vực chính (editor/graph/canvas) theo nội dung một tab. */
+  const applyTab = async (t: TabState) => {
+    currentPath = null;
+    if (t.kind === "note" && t.path) {
+      try {
+        const content = await api.readNote(t.path);
+        currentPath = t.path;
+        setCurrent(t.path);
+        setView("editor");
+        editor.setContent(content);
+        loadPanels(t.path);
+        return;
+      } catch (e) {
+        say(String(e));
+      }
+    }
+    setCurrent(null);
+    if (t.kind === "canvas" && t.path) {
+      setCanvasPath(t.path);
+      setView("canvas");
+    } else if (t.kind === "graph") {
+      setView("graph");
+    } else {
+      setView("editor");
+      editor.setContent("");
+    }
+  };
+
+  const switchTab = async (id: number) => {
+    if (id === activeId()) return;
+    const t = tabs().find((x) => x.id === id);
+    if (!t) return;
+    if (currentPath) editor.flush();
+    setActiveId(id);
+    await applyTab(t);
+  };
+
+  const newTab = () => {
+    if (currentPath) editor.flush();
+    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    setTabs((ts) => [...ts, t]);
+    setActiveId(t.id);
+    currentPath = null;
+    setCurrent(null);
+    setView("editor");
+    editor.setContent("");
+  };
+
+  const openNoteInNewTab = async (path: string) => {
+    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    setTabs((ts) => [...ts, t]);
+    setActiveId(t.id);
+    await openNote(path);
+  };
+
+  const closeTab = async (id: number) => {
+    const ts = tabs();
+    const idx = ts.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    const wasActive = id === activeId();
+    if (wasActive && currentPath) editor.flush();
+    let rest = ts.filter((t) => t.id !== id);
+    if (rest.length === 0) rest = [{ id: nextTabId++, kind: "empty", path: null }];
+    setTabs(rest);
+    if (wasActive) {
+      const next = rest[Math.min(idx, rest.length - 1)];
+      setActiveId(next.id);
+      await applyTab(next);
+    }
+  };
+
+  /** Bật/tắt graph trên tab hiện tại; tắt thì quay về nội dung cũ của tab. */
+  const toggleGraph = async () => {
+    const t = activeTab();
+    if (t.kind !== "graph") {
+      if (currentPath) editor.flush();
+      currentPath = null;
+      setCurrent(null);
+      setView("graph");
+      updateTab(t.id, { kind: "graph" });
+    } else {
+      const kind = !t.path
+        ? "empty"
+        : t.path.toLowerCase().endsWith(".canvas")
+          ? "canvas"
+          : "note";
+      updateTab(t.id, { kind });
+      await applyTab({ ...t, kind });
+    }
+  };
+
+  const tabTitle = (t: TabState) =>
+    t.kind === "graph"
+      ? "🕸 Graph"
+      : t.kind === "canvas"
+        ? `🧩 ${(t.path ?? "").replace(/\.canvas$/i, "")}`
+        : t.path
+          ? t.path.split("/").pop()!.replace(/\.md$/i, "")
+          : "New tab";
+
+  /** Note đổi path (rename) hoặc biến mất (to=null) → cập nhật mọi tab đang trỏ tới. */
+  const retargetTabs = (from: string, to: string | null) =>
+    setTabs((ts) =>
+      ts.map((t) =>
+        t.path === from ? { ...t, path: to, kind: to ? t.kind : "empty" } : t,
+      ),
+    );
 
   /** Mở (hoặc tạo) daily note hôm nay: Daily/YYYY-MM-DD.md */
   const openDaily = async () => {
@@ -170,7 +309,7 @@ export default function App() {
       // Link chưa tồn tại → tạo note mới ngay tại gốc vault, giống Obsidian.
       try {
         const rel = await api.createNote(target);
-        setNotes((await api.refresh()).notes);
+        applyInfo(await api.refresh());
         await openNote(rel);
       } catch (e) {
         say(String(e));
@@ -192,21 +331,72 @@ export default function App() {
     }
   };
 
-  const newNote = () =>
-    setPromptCfg({
-      title: "Tên note mới (có thể kèm folder, vd: Tech/Rust)",
-      value: "",
-      onOk: async (name) => {
-        if (!name.trim()) return;
-        try {
-          const rel = await api.createNote(name.trim());
-          applyInfo(await api.refresh());
-          await openNote(rel);
-        } catch (e) {
-          say(String(e));
-        }
-      },
-    });
+  /** Tên "Untitled", "Untitled 1", … chưa bị chiếm trong `taken` (so sánh không phân biệt hoa thường). */
+  const untitledName = (taken: Set<string>) => {
+    let name = "Untitled";
+    for (let i = 1; taken.has(name.toLowerCase()); i++) name = `Untitled ${i}`;
+    return name;
+  };
+
+  /** Tạo note ngay với tên Untitled rồi cho đặt tên inline trong tree — không popup. */
+  const newNote = async () => {
+    if (treeEditing()) return;
+    const taken = new Set(
+      notes()
+        .filter((n) => !n.path.includes("/"))
+        .map((n) => n.path.toLowerCase().replace(/\.md$/i, "")),
+    );
+    try {
+      const rel = await api.createNote(untitledName(taken));
+      applyInfo(await api.refresh());
+      await openNote(rel);
+      setTreeEditing({ path: rel, kind: "note" });
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  /** Tạo folder ngay ở gốc vault với tên Untitled rồi cho đặt tên inline. */
+  const newFolder = async () => {
+    if (treeEditing()) return;
+    const taken = new Set(
+      dirs().filter((d) => !d.includes("/")).map((d) => d.toLowerCase()),
+    );
+    try {
+      const rel = await api.createFolder(untitledName(taken));
+      applyInfo(await api.refresh());
+      setTreeEditing({ path: rel, kind: "dir" });
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  /** Xác nhận tên từ ô rename inline: đổi tên nếu khác, giữ nguyên nếu rỗng/không đổi. */
+  const finishTreeRename = async (name: string) => {
+    const ed = treeEditing();
+    setTreeEditing(null);
+    if (!ed) return;
+    const clean = name.trim().replace(/[\\/]/g, "");
+    const base = ed.path.split("/").pop()!.replace(/\.md$/i, "");
+    if (!clean || clean === base) return;
+    const dir = ed.path.includes("/") ? ed.path.slice(0, ed.path.lastIndexOf("/") + 1) : "";
+    try {
+      if (ed.kind === "note") {
+        const to = `${dir}${clean}.md`;
+        editor.flush();
+        await api.renameNote(ed.path, to);
+        applyInfo(await api.refresh());
+        retargetTabs(ed.path, to);
+        currentPath = null;
+        await openNote(to);
+      } else {
+        await api.renameFolder(ed.path, dir + clean);
+        applyInfo(await api.refresh());
+      }
+    } catch (e) {
+      say(String(e)); // đổi tên fail (vd trùng tên) → item vẫn giữ tên Untitled
+    }
+  };
 
   const renameCurrent = () => {
     const from = current();
@@ -220,9 +410,10 @@ export default function App() {
           editor.flush();
           const n = await api.renameNote(from, to.trim());
           applyInfo(await api.refresh());
-          const newPath = to.trim().toLowerCase().endsWith(".md") ? to.trim() : to.trim() + ".md";
+          const newPath = (to.trim().toLowerCase().endsWith(".md") ? to.trim() : to.trim() + ".md").replace(/\\/g, "/");
+          retargetTabs(from, newPath);
           currentPath = null;
-          await openNote(newPath.replace(/\\/g, "/"));
+          await openNote(newPath);
           say(`Đã đổi tên, rewrite ${n} link trỏ tới`);
         } catch (e) {
           say(String(e));
@@ -241,6 +432,7 @@ export default function App() {
         if (v.trim().toLowerCase() !== "xoa") return;
         try {
           await api.trashNote(path);
+          retargetTabs(path, null);
           currentPath = null;
           setCurrent(null);
           editor.setContent("");
@@ -359,6 +551,42 @@ export default function App() {
     });
   };
 
+  const toggleChat = () => {
+    const v = !chatOpen();
+    setChatOpen(v);
+    localStorage.setItem("chatOpen", v ? "1" : "0");
+  };
+
+  /** Sync GitHub một chạm: add → commit → push (git CLI chạy trong vault). */
+  const gitSync = async () => {
+    if (syncBusy()) return;
+    setSyncBusy(true);
+    say("Đang sync GitHub…");
+    try {
+      say(await api.gitSync());
+    } catch (e) {
+      say(String(e));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  /** Agent vừa sửa vault xong: re-index, reload note đang mở nếu nội dung đổi trên đĩa. */
+  const vaultChanged = async () => {
+    try {
+      applyInfo(await api.refresh());
+      setCanvases(await api.listCanvases().catch(() => []));
+      const p = currentPath;
+      if (p) {
+        const content = await api.readNote(p);
+        editor.setContent(content);
+        loadPanels(p);
+      }
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
   const openSettings = async () => {
     setSettingsOpen(true);
     try {
@@ -470,13 +698,22 @@ export default function App() {
         queueMicrotask(() => omniInput?.focus());
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
         e.preventDefault();
-        setView(view() === "graph" ? "editor" : "graph");
+        toggleGraph();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         editor.flush();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
         newNote();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        newTab();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        closeTab(activeId());
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "`") {
+        e.preventDefault();
+        setTermVisible((v) => !v);
       } else if (e.key === "Escape") {
         setOmniOpen(false);
         setPromptCfg(null);
@@ -492,14 +729,17 @@ export default function App() {
   });
 
   return (
-    <div class="app">
+    <div class="app" classList={{ "chat-open": chatOpen() }}>
       <nav class="ribbon">
         <button title="Tìm hoặc tạo note (Ctrl+K / Ctrl+O)" onClick={() => { setOmniOpen(true); setOmniQuery(""); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}>🔍</button>
         <button title="Hỏi đáp vault" onClick={() => { setOmniOpen(true); setOmniQuery("? "); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}>💬</button>
-        <button title="Graph view (Ctrl+G)" classList={{ active: view() === "graph" }} onClick={() => setView(view() === "graph" ? "editor" : "graph")}>🕸</button>
+        <button title="Graph view (Ctrl+G)" classList={{ active: view() === "graph" }} onClick={toggleGraph}>🕸</button>
         <button title="Daily note hôm nay" onClick={openDaily}>📅</button>
         <button title="Canvas mới" onClick={newCanvas}>🧩</button>
         <button title="Janitor: lint & dọn dẹp" onClick={runJanitor}>🧹</button>
+        <button title="Sync GitHub: add → commit → push" disabled={syncBusy()} onClick={gitSync}>⇅</button>
+        <button title="Chat với agent (sửa nội dung, format, cấu trúc vault)" classList={{ active: chatOpen() }} onClick={toggleChat}>🤖</button>
+        <button title="Terminal chạy claude (Ctrl+`)" classList={{ active: termVisible() }} onClick={() => setTermVisible((v) => !v)}>🖥</button>
         <div class="ribbon-spacer" />
         <button title="Mở vault khác" onClick={pickVault}>🗂</button>
         <button title="Settings" onClick={openSettings}>⚙</button>
@@ -508,6 +748,7 @@ export default function App() {
       <aside class="sidebar">
         <div class="sidebar-head">
           <button title="Note mới (Ctrl+N)" onClick={newNote}>＋</button>
+          <button title="Folder mới" onClick={newFolder}>🗀</button>
           <button
             title="Re-index"
             onClick={async () => {
@@ -518,16 +759,19 @@ export default function App() {
           >
             ⟳
           </button>
-          <input
-            class="quick-filter"
-            placeholder="Lọc nhanh…"
-            value={filter()}
-            onInput={(e) => setFilter(e.currentTarget.value)}
-          />
         </div>
         <Show when={root()} fallback={<div class="tree-empty">Chưa mở vault</div>}>
           <div class="tree-scroll">
-            <Tree notes={notes()} filter={filter()} current={current()} onOpen={openNote} />
+            <Tree
+              notes={notes()}
+              dirs={dirs()}
+              filter={""}
+              current={current()}
+              editing={treeEditing()}
+              onOpen={openNote}
+              onOpenNewTab={openNoteInNewTab}
+              onRename={finishTreeRename}
+            />
             <Show when={canvases().length > 0}>
               <div class="panel-title">Canvas</div>
               <For each={canvases()}>
@@ -548,6 +792,32 @@ export default function App() {
       </aside>
 
       <main class="main">
+        <div class="tabbar">
+          <For each={tabs()}>
+            {(t) => (
+              <div
+                class="tab"
+                classList={{ active: t.id === activeId() }}
+                onClick={() => switchTab(t.id)}
+                onAuxClick={(e) => e.button === 1 && closeTab(t.id)}
+                title={t.path ?? "Tab trống"}
+              >
+                <span class="tab-label">{tabTitle(t)}</span>
+                <button
+                  class="tab-close"
+                  title="Đóng tab (Ctrl+W)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeTab(t.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+          </For>
+          <button class="tab-add" title="Tab mới (Ctrl+T)" onClick={newTab}>＋</button>
+        </div>
         <div class="note-header">
           <span class="note-path">
             {view() === "graph" ? "🕸 Graph view" : view() === "canvas" ? `🧩 ${canvasPath() ?? ""}` : current() ?? ""}
@@ -593,6 +863,7 @@ export default function App() {
             />
           )}
         </Show>
+        <TermPanel visible={termVisible()} onClose={() => setTermVisible(false)} />
       </main>
 
       <aside class="rightbar">
@@ -633,6 +904,8 @@ export default function App() {
           </For>
         </Show>
       </aside>
+
+      <ChatPanel visible={chatOpen()} currentPath={current()} onVaultChanged={vaultChanged} />
 
       <footer class="statusbar">
         <span>{status()}</span>
@@ -779,8 +1052,16 @@ export default function App() {
                       checked={llm()?.pref === opt.v || (!llm()?.pref && opt.v === "auto")}
                       onChange={() => choosePref(opt.v)}
                     />
-                    <span>{opt.label}</span>
-                    <span class="settings-state">
+                    <span class="settings-label">{opt.label}</span>
+                    <span
+                      class="settings-state"
+                      classList={{
+                        ok: (opt.v === "claude" && !!llm()?.claude_ok) || (opt.v === "codex" && !!llm()?.codex_ok),
+                        missing:
+                          (opt.v === "claude" && llm() != null && !llm()!.claude_ok) ||
+                          (opt.v === "codex" && llm() != null && !llm()!.codex_ok),
+                      }}
+                    >
                       {opt.v === "claude" && (llm()?.claude_ok ? "✓ có sẵn" : "✗ không thấy trên PATH")}
                       {opt.v === "codex" && (llm()?.codex_ok ? "✓ có sẵn" : "✗ không thấy trên PATH")}
                     </span>
