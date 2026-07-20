@@ -8,10 +8,28 @@ interface Msg {
   provider?: string;
 }
 
-const QUICK_PROMPTS = [
-  { label: "✨ Làm đẹp note này", text: "Làm đẹp format note đang mở: chuẩn hóa heading, danh sách, code block, bảng. Giữ nguyên nội dung và wikilink." },
-  { label: "🔗 Sửa link gãy", text: "Tìm các wikilink gãy trong vault và sửa lại cho trỏ đúng note (đổi tên gần đúng, heading đổi…). Liệt kê các link đã sửa." },
-  { label: "🗂 Gợi ý cấu trúc vault", text: "Phân tích cấu trúc thư mục và tên file của vault, đề xuất cách tổ chức lại hợp lý hơn. Chỉ đề xuất, chưa di chuyển file." },
+/** Quick prompt nhắc tới note thì ghi đích danh path — agent không phải đoán "note đang mở". */
+const QUICK_PROMPTS: {
+  label: string;
+  needsNote?: boolean;
+  text: (path: string | null) => string;
+}[] = [
+  {
+    label: "✨ Làm đẹp note đang mở",
+    needsNote: true,
+    text: (p) =>
+      `Làm đẹp format cho đúng một file: "${p}". Chuẩn hóa heading, danh sách, code block, bảng. Giữ nguyên nội dung và wikilink. Không sửa file nào khác.`,
+  },
+  {
+    label: "🔗 Sửa link gãy",
+    text: () =>
+      "Tìm các wikilink gãy trong vault và sửa lại cho trỏ đúng note (đổi tên gần đúng, heading đổi…). Liệt kê các link đã sửa.",
+  },
+  {
+    label: "🗂 Gợi ý cấu trúc vault",
+    text: () =>
+      "Phân tích cấu trúc thư mục và tên file của vault, đề xuất cách tổ chức lại hợp lý hơn. Chỉ đề xuất, chưa di chuyển file.",
+  },
 ];
 
 /** Sidebar chat với agent (Claude Code / Codex headless) — agent chạy với cwd là vault
@@ -20,6 +38,7 @@ export function ChatPanel(props: {
   visible: boolean;
   currentPath: string | null;
   onVaultChanged: () => Promise<void>;
+  onClose: () => void;
 }) {
   const [msgs, setMsgs] = createSignal<Msg[]>([]);
   const [input, setInput] = createSignal("");
@@ -76,6 +95,9 @@ export function ChatPanel(props: {
         <button title="Phiên mới (xóa ngữ cảnh hội thoại)" onClick={newSession}>
           ⟳
         </button>
+        <button title="Đóng panel chat" onClick={props.onClose}>
+          ×
+        </button>
       </div>
 
       <div class="chat-scroll" ref={scroller}>
@@ -84,7 +106,12 @@ export function ChatPanel(props: {
             <p>Nhờ agent sửa nội dung, làm đẹp format, hay tổ chức lại vault — agent chạy Claude Code ngay trong vault của bạn.</p>
             <For each={QUICK_PROMPTS}>
               {(q) => (
-                <button class="chat-chip" disabled={busy()} onClick={() => send(q.text)}>
+                <button
+                  class="chat-chip"
+                  disabled={busy() || (q.needsNote && !props.currentPath)}
+                  title={q.needsNote && !props.currentPath ? "Mở một note trước đã" : undefined}
+                  onClick={() => send(q.text(props.currentPath))}
+                >
                   {q.label}
                 </button>
               )}

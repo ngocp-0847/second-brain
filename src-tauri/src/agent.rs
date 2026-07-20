@@ -36,7 +36,11 @@ fn system_prompt(context_path: Option<&str>) -> String {
          - Trả lời ngắn gọn bằng tiếng Việt, cuối câu trả lời liệt kê file đã thay đổi (nếu có).\n",
     );
     if let Some(path) = context_path {
-        p.push_str(&format!("\nNgười dùng đang mở note: {path}\n"));
+        p.push_str(&format!(
+            "\nNote người dùng đang mở trong app: \"{path}\". Khi họ nói \"note này\" / \"note đang mở\", \
+             luôn hiểu là đúng file đó — TUYỆT ĐỐI không tự đoán note khác \
+             (không dò .obsidian/workspace hay tab nào cả).\n"
+        ));
     }
     p
 }
@@ -63,9 +67,15 @@ pub fn chat(
     context_path: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<AgentReply> {
+    // Path nhúng thẳng vào tin nhắn — system prompt có thể không được áp lại khi --resume,
+    // và agent từng tự đoán "note đang mở" qua .obsidian/workspace thay vì dùng ngữ cảnh.
+    let message = match context_path {
+        Some(p) => format!("(Ngữ cảnh: note tôi đang mở là \"{p}\")\n\n{message}"),
+        None => message.to_string(),
+    };
     match provider {
-        qa::Provider::ClaudeCli => chat_claude(app, root, message, context_path, session_id),
-        qa::Provider::CodexCli => chat_codex(root, message, context_path),
+        qa::Provider::ClaudeCli => chat_claude(app, root, &message, context_path, session_id),
+        qa::Provider::CodexCli => chat_codex(root, &message, context_path),
     }
 }
 
