@@ -57,6 +57,84 @@ const PALETTE: Record<string, string> = {
 const EDGE_DEFAULT = "#4a5170";
 const EDGE_SELECTED = "#a48fff";
 
+// ---- text card: URL trần, [label](url), [[wikilink]] bấm được (chỉ khâu hiển thị,
+// nội dung text giữ nguyên trong file .canvas — tương thích Obsidian) ----
+const LINKIFY =
+  /(!?\[\[([^\[\]]+?)\]\])|(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(https?:\/\/[^\s<>"')\]]+)/g;
+
+type LinkPart =
+  | { t: "text"; s: string }
+  | { t: "url"; href: string; label: string }
+  | { t: "wiki"; target: string; label: string };
+
+function LinkifiedText(props: { text: string; onOpenNote: (path: string) => void }) {
+  const parts = createMemo<LinkPart[]>(() => {
+    const out: LinkPart[] = [];
+    const text = props.text;
+    let last = 0;
+    for (const m of text.matchAll(LINKIFY)) {
+      if (m.index! > last) out.push({ t: "text", s: text.slice(last, m.index) });
+      if (m[1]) {
+        const inner = m[2];
+        const pipe = inner.indexOf("|");
+        const target = (pipe >= 0 ? inner.slice(0, pipe) : inner).split("#")[0].trim();
+        out.push({ t: "wiki", target, label: pipe >= 0 ? inner.slice(pipe + 1) : inner });
+      } else if (m[3]) {
+        out.push({ t: "url", href: m[5], label: m[4] });
+      } else {
+        out.push({ t: "url", href: m[6], label: m[6] });
+      }
+      last = m.index! + m[0].length;
+    }
+    if (last < text.length) out.push({ t: "text", s: text.slice(last) });
+    return out;
+  });
+
+  const openWiki = async (target: string) => {
+    const p = await api.resolveLink(target).catch(() => null);
+    if (p) props.onOpenNote(p);
+  };
+
+  return (
+    <For each={parts()}>
+      {(p) =>
+        p.t === "text" ? (
+          <span>{p.s}</span>
+        ) : p.t === "url" ? (
+          <a
+            class="canvas-link"
+            href={p.href}
+            title={p.href}
+            onMouseDown={(e) => e.stopPropagation()}
+            onDblClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              window.open(p.href, "_blank");
+            }}
+          >
+            {p.label}
+          </a>
+        ) : (
+          <a
+            class="canvas-link canvas-link-wiki"
+            title={`Mở "${p.target}"`}
+            onMouseDown={(e) => e.stopPropagation()}
+            onDblClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              openWiki(p.target);
+            }}
+          >
+            {p.label}
+          </a>
+        )
+      }
+    </For>
+  );
+}
+
 // ---- ảnh trong canvas: file node trỏ tới ảnh sẽ render như Obsidian ----
 const IMG_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
 const IMG_RE = new RegExp(`\\.(${IMG_EXTS.join("|")})$`, "i");
@@ -764,7 +842,11 @@ export function CanvasView(props: {
                     }}
                   />
                 ) : (
-                  <div class="canvas-text">{n.text || "…"}</div>
+                  <div class="canvas-text">
+                    <Show when={n.text} fallback={<>…</>}>
+                      <LinkifiedText text={n.text!} onOpenNote={props.onOpenNote} />
+                    </Show>
+                  </div>
                 )}
               </div>
             );

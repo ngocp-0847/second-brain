@@ -31,6 +31,7 @@ import {
   keymap,
   ViewPlugin,
   ViewUpdate,
+  WidgetType,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import type { NoteMeta } from "./api";
@@ -54,6 +55,71 @@ interface EditorOpts {
 const WIKILINK = /(!?)\[\[([^\[\]]+?)\]\]/g;
 const hideMark = Decoration.replace({});
 
+// ---- mermaid: render ```mermaid thành diagram khi con trỏ ở ngoài block ----
+// Lib nặng (~1.5MB) nên lazy-load lần đầu gặp block; SVG cache theo code.
+let mermaidMod: Promise<typeof import("mermaid")> | null = null;
+const loadMermaid = () => {
+  if (!mermaidMod) {
+    mermaidMod = import("mermaid").then((m) => {
+      m.default.initialize({ startOnLoad: false, theme: "dark", darkMode: true });
+      return m;
+    });
+  }
+  return mermaidMod;
+};
+
+const mermaidCache = new Map<string, string>(); // code → svg
+let mermaidSeq = 0;
+
+class MermaidWidget extends WidgetType {
+  constructor(
+    readonly code: string,
+    readonly editPos: number,
+  ) {
+    super();
+  }
+
+  eq(other: MermaidWidget) {
+    return other.code === this.code;
+  }
+
+  toDOM(view: EditorView) {
+    const el = document.createElement("div");
+    el.className = "cm-mermaid";
+    el.title = "Click để sửa code mermaid";
+    el.addEventListener("click", () => {
+      view.dispatch({ selection: { anchor: this.editPos }, scrollIntoView: true });
+      view.focus();
+    });
+    const cached = mermaidCache.get(this.code);
+    if (cached) {
+      el.innerHTML = cached;
+      return el;
+    }
+    el.textContent = "⏳ đang render diagram…";
+    loadMermaid()
+      .then((m) => m.default.render(`mm-${mermaidSeq++}`, this.code))
+      .then(({ svg }) => {
+        mermaidCache.set(this.code, svg);
+        el.innerHTML = svg;
+      })
+      .catch((e) => {
+        el.innerHTML = "";
+        el.className = "cm-mermaid cm-mermaid-error";
+        el.textContent = `⚠ mermaid: ${String(e?.message ?? e).split("\n")[0]}`;
+        // mermaid.render lỗi để lại element rác trong body — dọn đi.
+        document.querySelectorAll('[id^="dmm-"], [id^="mm-"]').forEach((x) => {
+          if (!el.contains(x) && x.closest(".cm-mermaid") === null) x.remove();
+        });
+      });
+    return el;
+  }
+
+  ignoreEvent(e: Event) {
+    return e.type !== "click";
+  }
+}
+
 function buildLivePreview(view: EditorView): DecorationSet {
   const decos: Range<Decoration>[] = [];
   const state = view.state;
@@ -70,6 +136,30 @@ function buildLivePreview(view: EditorView): DecorationSet {
       from,
       to,
       enter(node) {
+        // ```mermaid → thay cả block bằng diagram (trừ khi đang sửa bên trong).
+        // Cú pháp chuẩn Obsidian — nội dung file .md không đổi gì.
+        if (node.name === "FencedCode") {
+          const first = state.doc.lineAt(node.from);
+          const last = state.doc.lineAt(node.to);
+          const lang = first.text.replace(/^\s*`+/, "").trim().toLowerCase();
+          if (lang !== "mermaid") return;
+          for (let i = first.number; i <= last.number; i++) {
+            if (activeLines.has(i)) return false;
+          }
+          const code =
+            last.number > first.number + 1
+              ? state.sliceDoc(state.doc.line(first.number + 1).from, state.doc.line(last.number - 1).to)
+              : "";
+          if (code.trim()) {
+            decos.push(
+              Decoration.replace({
+                widget: new MermaidWidget(code, first.to),
+                block: true,
+              }).range(first.from, last.to),
+            );
+          }
+          return false;
+        }
         if (
           node.name !== "HeaderMark" &&
           node.name !== "EmphasisMark" &&
@@ -162,6 +252,21 @@ const theme = EditorView.theme(
     ".cm-activeLine": { backgroundColor: "#ffffff08" },
     ".cm-wikilink": { color: "#a48fff", cursor: "pointer" },
     ".cm-wikilink:hover": { textDecoration: "underline" },
+    ".cm-mermaid": {
+      display: "flex",
+      justifyContent: "center",
+      maxWidth: "46rem",
+      margin: "0.4rem auto",
+      padding: "0.8rem 1rem",
+      background: "#1e2130",
+      border: "1px solid #2a2f42",
+      borderRadius: "10px",
+      cursor: "pointer",
+      color: "#8b93a7",
+      overflow: "auto",
+    },
+    ".cm-mermaid svg": { maxWidth: "100%", height: "auto" },
+    ".cm-mermaid-error": { color: "#e0876a", fontFamily: "Consolas, monospace", fontSize: "13px" },
     ".cm-tooltip.cm-tooltip-autocomplete": {
       backgroundColor: "#1e2130",
       border: "1px solid #333a52",
