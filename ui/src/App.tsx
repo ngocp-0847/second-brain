@@ -104,6 +104,42 @@ export default function App() {
   let editor: EditorHandle;
   let omniInput: HTMLInputElement | undefined;
   let currentPath: string | null = null; // bản sao cho closure của editor
+  // H1 của note lúc mở/lưu lần cuối — chỉ auto-rename file khi CHÍNH H1 bị sửa
+  // trong phiên này (mở note cũ có H1 lệch tên file thì không tự ý đổi).
+  let lastH1: string | null = null;
+
+  const extractH1 = (content: string) => {
+    const m = content.match(/^#[ \t]+(.+?)\s*$/m);
+    return m ? m[1].trim() : null;
+  };
+
+  const sanitizeName = (s: string) =>
+    s.replace(/[\\/:*?"<>|#^\[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+
+  /** H1 đổi → đổi tên file theo (giữ thư mục, link trỏ tới tự rewrite). */
+  const renameToH1 = async (h1: string) => {
+    const from = currentPath;
+    if (!from) return;
+    const clean = sanitizeName(h1);
+    if (!clean) return;
+    const dir = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
+    const stem = from.split("/").pop()!.replace(/\.md$/i, "");
+    if (stem.toLowerCase() === clean.toLowerCase()) return;
+    const to = `${dir}${clean}.md`;
+    // Đã có note khác trùng tên → thôi, không đổi (user chỉnh H1 tiếp sẽ thử lại).
+    if (notes().some((n) => n.path.toLowerCase() === to.toLowerCase())) return;
+    try {
+      await api.renameNote(from, to);
+      applyInfo(await api.refresh());
+      retargetTabs(from, to);
+      currentPath = to;
+      setCurrent(to);
+      loadPanels(to);
+      say(`Tên file theo H1: ${clean}.md`);
+    } catch {
+      // rename fail (tên không hợp lệ trên fs…) → giữ tên cũ, không phiền user
+    }
+  };
 
   const say = (msg: string) => {
     setStatus(msg);
@@ -148,6 +184,7 @@ export default function App() {
     try {
       const content = await api.readNote(path);
       currentPath = path;
+      lastH1 = extractH1(content);
       setCurrent(path);
       setView("editor");
       editor.setContent(content);
@@ -174,6 +211,7 @@ export default function App() {
       try {
         const content = await api.readNote(t.path);
         currentPath = t.path;
+        lastH1 = extractH1(content);
         setCurrent(t.path);
         setView("editor");
         editor.setContent(content);
@@ -334,6 +372,12 @@ export default function App() {
       loadPanels(currentPath);
       const info = await api.refresh();
       applyInfo(info);
+      // H1 vừa bị sửa trong lần lưu này → đồng bộ tên file theo H1.
+      const h1 = extractH1(content);
+      if (h1 !== lastH1) {
+        lastH1 = h1;
+        if (h1) await renameToH1(h1);
+      }
     } catch (e) {
       say(String(e));
     }
