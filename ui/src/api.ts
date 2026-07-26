@@ -80,6 +80,9 @@ export const api = {
   historyGet: (id: number) => invoke<string>("history_get", { id }),
   agentChat: (message: string, contextPath: string | null, sessionId: string | null) =>
     invoke<AgentReply>("agent_chat", { message, contextPath, sessionId }),
+  /** Sửa đúng vùng chọn: trả về text mới cho vùng đó, UI tự thay vào editor. */
+  agentTransform: (selection: string, instruction: string, contextPath: string | null) =>
+    invoke<string>("agent_transform", { selection, instruction, contextPath }),
   termOpen: (cols: number, rows: number) => invoke<number>("term_open", { cols, rows }),
   termWrite: (id: number, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: number, cols: number, rows: number) =>

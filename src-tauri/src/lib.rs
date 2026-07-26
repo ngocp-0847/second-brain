@@ -42,15 +42,7 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// Không cho cửa sổ console nháy lên khi app GUI spawn process con (git, agent CLI).
-#[cfg(windows)]
-pub(crate) fn hide_console(c: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    c.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-pub(crate) fn hide_console(_c: &mut std::process::Command) {}
+pub(crate) use vault_core::proc::hide_console;
 
 #[derive(Serialize)]
 struct NoteMeta {
@@ -470,6 +462,27 @@ fn agent_chat(
         .map_err(err)
 }
 
+/// Sửa vùng chọn trong editor bằng agent: trả về text mới cho ĐÚNG vùng đó,
+/// UI tự thay vào (không ghi file ở đây → Ctrl+Z hoàn tác được).
+#[tauri::command(async)]
+fn agent_transform(
+    selection: String,
+    instruction: String,
+    context_path: Option<String>,
+    state: State<AppState>,
+) -> CmdResult<String> {
+    if selection.trim().is_empty() {
+        return Err("vùng chọn rỗng".into());
+    }
+    if instruction.trim().is_empty() {
+        return Err("chưa nhập yêu cầu".into());
+    }
+    let pref = state.llm_pref.lock().map_err(err)?.clone();
+    let provider = qa::provider_from_pref(&pref)
+        .ok_or("không tìm thấy Claude Code CLI hoặc Codex CLI trên PATH (kiểm tra Settings ⚙)")?;
+    agent::transform(provider, &selection, &instruction, context_path.as_deref()).map_err(err)
+}
+
 #[tauri::command]
 fn term_open(
     cols: u16,
@@ -710,6 +723,7 @@ pub fn run() {
             set_llm_pref,
             git_sync,
             agent_chat,
+            agent_transform,
             note_history,
             history_get,
             term_open,

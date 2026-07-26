@@ -36,6 +36,17 @@ import {
 import { tags } from "@lezer/highlight";
 import type { NoteMeta } from "./api";
 
+/** Vùng chọn hiện tại + toạ độ màn hình để neo toolbar nổi ("Sửa bằng AI"). */
+export interface SelectionInfo {
+  text: string;
+  from: number;
+  to: number;
+  /** Toạ độ viewport (px) của vùng chọn — dùng position: fixed. */
+  top: number;
+  bottom: number;
+  left: number;
+}
+
 export interface EditorHandle {
   view: EditorView;
   setContent(text: string): void;
@@ -43,6 +54,8 @@ export interface EditorHandle {
    *  sửa) — Ctrl+Z revert được thay đổi đó, giống Obsidian. */
   updateContent(text: string): void;
   getContent(): string;
+  /** Thay một khoảng bằng text mới rồi chọn lại kết quả — transaction nên Ctrl+Z hoàn tác được. */
+  replaceRange(from: number, to: number, text: string): void;
   /** Lưu ngay nếu đang có thay đổi chưa flush. */
   flush(): void;
   destroy(): void;
@@ -53,6 +66,8 @@ interface EditorOpts {
   getNotes: () => NoteMeta[];
   onSave: (content: string) => void;
   onOpenLink: (target: string) => void;
+  /** Vùng chọn đổi (null = không còn chọn gì) — App dùng để hiện nút "Sửa bằng AI". */
+  onSelection?: (sel: SelectionInfo | null) => void;
 }
 
 const WIKILINK = /(!?)\[\[([^\[\]]+?)\]\]/g;
@@ -312,6 +327,29 @@ export function createEditor(opts: EditorOpts): EditorHandle {
     return { from: m.from + 2, options, validFor: /^[^\[\]|#]*$/ };
   };
 
+  /** Vùng chọn chính, kèm toạ độ (bỏ qua chọn rỗng / chỉ toàn khoảng trắng). */
+  const readSelection = (v: EditorView): SelectionInfo | null => {
+    const r = v.state.selection.main;
+    if (r.empty) return null;
+    const text = v.state.sliceDoc(r.from, r.to);
+    if (!text.trim()) return null;
+    const a = v.coordsAtPos(r.from);
+    const b = v.coordsAtPos(r.to);
+    if (!a || !b) return null;
+    // Cuộn ra khỏi tầm nhìn → coi như không có vùng chọn, khỏi để toolbar lơ lửng sai chỗ.
+    const box = v.scrollDOM.getBoundingClientRect();
+    if (b.bottom < box.top + 4 || a.top > box.bottom - 4) return null;
+    return {
+      text,
+      from: r.from,
+      to: r.to,
+      top: Math.min(a.top, b.top),
+      bottom: Math.max(a.bottom, b.bottom),
+      // Neo vào đầu dòng cuối cùng của vùng chọn cho khỏi lệch ra ngoài editor.
+      left: b.top > a.top ? Math.min(a.left, b.left) : a.left,
+    };
+  };
+
   const view = new EditorView({
     parent: opts.parent,
     state: EditorState.create({ doc: "" }),
@@ -341,6 +379,8 @@ export function createEditor(opts: EditorOpts): EditorHandle {
             if (saveTimer) clearTimeout(saveTimer);
             saveTimer = setTimeout(flush, 800);
           }
+          if (opts.onSelection && (u.selectionSet || u.docChanged || u.geometryChanged))
+            opts.onSelection(readSelection(u.view));
         }),
         EditorView.domEventHandlers({
           mousedown(e) {
@@ -358,6 +398,12 @@ export function createEditor(opts: EditorOpts): EditorHandle {
       ],
     });
 
+  // Cuộn không tạo transaction → phải bám riêng để toolbar nổi đi theo vùng chọn.
+  const onScroll = opts.onSelection
+    ? () => opts.onSelection!(readSelection(view))
+    : null;
+  if (onScroll) view.scrollDOM.addEventListener("scroll", onScroll, { passive: true });
+
   return {
     view,
     setContent(text) {
@@ -365,6 +411,8 @@ export function createEditor(opts: EditorOpts): EditorHandle {
       view.setState(makeState(text));
       suppress = false;
       dirty = false;
+      // setState không gọi update listener → tự dọn vùng chọn của note trước.
+      opts.onSelection?.(null);
     },
     updateContent(text) {
       if (text === view.state.doc.toString()) return;
@@ -374,9 +422,20 @@ export function createEditor(opts: EditorOpts): EditorHandle {
       dirty = false;
     },
     getContent: () => view.state.doc.toString(),
+    replaceRange(from, to, text) {
+      const end = Math.min(to, view.state.doc.length);
+      view.dispatch({
+        changes: { from, to: end, insert: text },
+        selection: { anchor: from, head: from + text.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      flush();
+    },
     flush,
     destroy() {
       if (saveTimer) clearTimeout(saveTimer);
+      if (onScroll) view.scrollDOM.removeEventListener("scroll", onScroll);
       view.destroy();
     },
   };

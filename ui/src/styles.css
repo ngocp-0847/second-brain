@@ -1372,6 +1372,208 @@ details[open] > .tree-dir::before {
   height: 100%;
 }
 
+/* ---- vùng chọn → AI: nút nổi + popover prompt ---- */
+.sel-fab,
+.sel-pop {
+  position: fixed;
+  z-index: 40;
+}
+
+.sel-fab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  color: var(--accent-strong);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.sel-fab:hover {
+  background: var(--accent-bg);
+}
+
+.sel-kbd {
+  color: var(--fg-faint);
+  font-size: 10.5px;
+}
+
+.sel-pop {
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-sm);
+  padding: var(--sp-sm) var(--sp-md) var(--sp-md);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-card);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+}
+
+.sel-pop-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
+.sel-pop-head span {
+  flex: 1;
+}
+
+.sel-pop-head button {
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sel-pop-head button:hover {
+  color: var(--fg-strong);
+}
+
+.sel-pop > input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px var(--sp-sm);
+  outline: none;
+}
+
+.sel-pop > input:focus {
+  border-color: var(--accent-border);
+}
+
+.sel-pop-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sel-chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  color: var(--fg-soft);
+  font-size: 11.5px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.sel-chip:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
+.sel-chip:disabled,
+.sel-tochat:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sel-pop-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+}
+
+.sel-hint {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+.sel-tochat {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  padding: 4px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sel-tochat:hover:not(:disabled) {
+  color: var(--accent-strong);
+  border-color: var(--accent-border);
+}
+
+.sel-error {
+  color: var(--danger);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+/* ---- vùng chọn đính kèm trong chat ---- */
+.chat-attach {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-sm);
+  background: var(--bg);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-md);
+}
+
+.chat-attach-head {
+  display: flex;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--accent-strong);
+}
+
+.chat-attach-head span {
+  flex: 1;
+}
+
+.chat-attach-head button {
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-attach-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chat-chip.mini {
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 9999px;
+}
+
+.chat-quote {
+  max-height: 84px;
+  overflow: auto;
+  border-left: 2px solid var(--accent-border);
+  padding: 2px 0 2px var(--sp-sm);
+  color: var(--fg-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 ::-webkit-scrollbar {
   width: 9px;
 }
