@@ -70,15 +70,17 @@ fn cli_works(cmd: &str) -> bool {
 }
 
 fn shell_command(cmd: &str, args: &[&str]) -> Command {
-    if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/c").arg(cmd).args(args);
+    // hide_console cho cả `cmd /c` lẫn lệnh trực tiếp: app GUI không có console nên
+    // thiếu cờ này là mỗi lần gọi CLI (kể cả `--version`) sẽ nháy một cửa sổ đen.
+    let mut c = if cfg!(windows) {
+        let mut c = vault_core::proc::command("cmd");
+        c.arg("/c").arg(cmd);
         c
     } else {
-        let mut c = Command::new(cmd);
-        c.args(args);
-        c
-    }
+        vault_core::proc::command(cmd)
+    };
+    c.args(args);
+    c
 }
 
 #[derive(Debug, Clone)]
