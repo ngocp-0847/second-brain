@@ -10,7 +10,6 @@ pub mod restructure;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 use vault_core::Vault;
 
 /// File nhỏ hơn ngưỡng này (byte) và không được sửa 30 ngày → đề xuất dọn.
@@ -84,7 +83,7 @@ pub fn ensure_schema(vault: &Vault) -> Result<()> {
 
 fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
     let git_dir = root.join(".brain").join("snapshots");
-    let out = Command::new("git")
+    let out = vault_core::proc::command("git")
         .arg("--git-dir")
         .arg(&git_dir)
         .arg("--work-tree")
@@ -97,7 +96,12 @@ fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
 
 /// Commit toàn vault vào repo ẩn `.brain/snapshots`. Trả về false nếu không có git.
 pub fn snapshot(root: &Path, label: &str) -> Result<bool> {
-    if Command::new("git").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+    if vault_core::proc::command("git")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
         return Ok(false);
     }
     let git_dir = root.join(".brain").join("snapshots");

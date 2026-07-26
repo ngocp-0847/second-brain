@@ -79,6 +79,52 @@ pub fn chat(
     }
 }
 
+/// Sửa đúng một vùng chọn trong note: agent chỉ SINH TEXT (không có tool, cwd là thư mục
+/// tạm) rồi UI thay vào vùng chọn bằng transaction — nên Ctrl+Z hoàn tác được và tuyệt đối
+/// không có nguy cơ agent sửa lan sang file khác.
+pub fn transform(
+    provider: qa::Provider,
+    selection: &str,
+    instruction: &str,
+    context_path: Option<&str>,
+) -> Result<String> {
+    let where_ = context_path.map(|p| format!(" trong note \"{p}\"")).unwrap_or_default();
+    let prompt = format!(
+        "Bạn là trợ lý biên tập Markdown. Người dùng đã chọn một đoạn{where_} và yêu cầu:\n\
+         \"{instruction}\"\n\n\
+         Chỉ áp dụng yêu cầu đó lên ĐOẠN ĐƯỢC CHỌN dưới đây. Quy tắc bắt buộc:\n\
+         - Xuất ra DUY NHẤT nội dung Markdown mới của đoạn đó — không mở bài, không giải thích, \
+           không nhắc lại yêu cầu, không bọc toàn bộ kết quả trong ``` (trừ khi chính nội dung cần code block).\n\
+         - Đoạn này nằm giữa một note lớn hơn: giữ mức thụt lề và không thêm/bớt dòng trống ở đầu-cuối.\n\
+         - Giữ nguyên mọi wikilink [[...]], link, và không bịa thêm thông tin mới.\n\
+         - Nếu yêu cầu không rõ hoặc không áp dụng được, trả về đoạn gốc y nguyên.\n\n\
+         ĐOẠN ĐƯỢC CHỌN:\n{selection}"
+    );
+    let out = qa::generate(provider, &prompt)?;
+    Ok(strip_wrapper_fence(&out, selection))
+}
+
+/// Model hay bọc cả câu trả lời trong ```markdown … ``` — bóc ra, trừ khi bản thân
+/// đoạn gốc đã là một fenced block (khi đó fence là nội dung thật).
+fn strip_wrapper_fence(out: &str, selection: &str) -> String {
+    let t = out.trim_matches('\n');
+    if selection.trim_start().starts_with("```") {
+        return t.to_string();
+    }
+    let mut lines: Vec<&str> = t.lines().collect();
+    let Some(first) = lines.first().map(|l| l.trim()) else { return t.to_string() };
+    let info = first.strip_prefix("```").map(str::trim).unwrap_or("").to_lowercase();
+    if !first.starts_with("```") || !matches!(info.as_str(), "" | "markdown" | "md") {
+        return t.to_string();
+    }
+    if lines.last().map(|l| l.trim()) != Some("```") {
+        return t.to_string();
+    }
+    lines.remove(0);
+    lines.pop();
+    lines.join("\n")
+}
+
 /// Claude Code headless: stream-json để bắt tiến trình từng tool call,
 /// `--resume` giữ ngữ cảnh hội thoại giữa các tin nhắn.
 fn chat_claude(
@@ -221,4 +267,32 @@ fn chat_codex(root: &std::path::Path, message: &str, context_path: Option<&str>)
         bail!("codex trả về rỗng");
     }
     Ok(AgentReply { text, session_id: None, provider: "codex".into() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_wrapper_fence;
+
+    #[test]
+    fn strips_markdown_wrapper() {
+        let out = "```markdown\n| a | b |\n| - | - |\n```";
+        assert_eq!(strip_wrapper_fence(out, "a, b"), "| a | b |\n| - | - |");
+    }
+
+    #[test]
+    fn keeps_real_code_block() {
+        let out = "```rust\nfn main() {}\n```";
+        assert_eq!(strip_wrapper_fence(out, "fn main"), out);
+    }
+
+    #[test]
+    fn keeps_fence_when_selection_was_a_fence() {
+        let out = "```\nfoo\n```";
+        assert_eq!(strip_wrapper_fence(out, "```\nbar\n```"), out);
+    }
+
+    #[test]
+    fn leaves_plain_text_alone() {
+        assert_eq!(strip_wrapper_fence("\nxin chào\n", "chào"), "xin chào");
+    }
 }

@@ -21,13 +21,22 @@ import {
   type Stats,
 } from "./api";
 import { CanvasView } from "./canvas";
-import { ChatPanel } from "./chat";
-import { createEditor, type EditorHandle } from "./editor";
+import { ChatPanel, type ChatSelection } from "./chat";
+import { createEditor, type EditorHandle, type SelectionInfo } from "./editor";
 import { GraphView } from "./graph";
 import { TermPanel } from "./terminal";
 import { Tree, type TreeEditing } from "./tree";
 
 type View = "editor" | "graph" | "canvas";
+
+/** Prompt sẵn cho "Sửa vùng chọn bằng AI" — bấm là chạy luôn. */
+const SELECTION_ACTIONS = [
+  { label: "📊 Bảng markdown", prompt: "Format đoạn này thành table markdown" },
+  { label: "✂ Viết gọn lại", prompt: "Viết lại đoạn này cho gọn và rõ hơn, giữ đủ ý" },
+  { label: "• Bullet list", prompt: "Chuyển đoạn này thành danh sách gạch đầu dòng" },
+  { label: "✓ Sửa chính tả", prompt: "Sửa chính tả và ngữ pháp, giữ nguyên cách diễn đạt" },
+  { label: "🇬🇧 Dịch EN", prompt: "Dịch đoạn này sang tiếng Anh tự nhiên" },
+];
 
 /** Một tab của khu vực chính: note, graph, canvas hoặc trống ("New tab"). */
 interface TabState {
@@ -92,6 +101,15 @@ export default function App() {
   const [rightOpen, setRightOpen] = createSignal(localStorage.getItem("rightOpen") !== "0");
   const [termVisible, setTermVisible] = createSignal(false);
   const [syncBusy, setSyncBusy] = createSignal(false);
+
+  // Vùng chọn trong editor → prompt AI sửa tại chỗ (popover) hoặc đẩy sang chat Agent.
+  const [sel, setSel] = createSignal<SelectionInfo | null>(null);
+  const [aiOpen, setAiOpen] = createSignal(false);
+  const [aiPrompt, setAiPrompt] = createSignal("");
+  const [aiBusy, setAiBusy] = createSignal(false);
+  const [aiError, setAiError] = createSignal("");
+  const [chatSel, setChatSel] = createSignal<ChatSelection | null>(null);
+  let aiInput: HTMLInputElement | undefined;
 
   // Modal nhập text (thay window.prompt vốn không chạy trong WebView)
   const [promptCfg, setPromptCfg] = createSignal<{
@@ -646,6 +664,61 @@ export default function App() {
     }
   };
 
+  // ---- Vùng chọn → AI ----
+
+  /** Neo một panel nổi kích thước w×h cạnh vùng chọn, không cho tràn ra ngoài cửa sổ. */
+  const anchor = (s: SelectionInfo, w: number, h: number) => {
+    const left = Math.max(8, Math.min(s.left, window.innerWidth - w - 8));
+    const below = s.bottom + 8;
+    const top = below + h + 8 < window.innerHeight ? below : Math.max(70, s.top - h - 8);
+    return { left: `${left}px`, top: `${top}px` };
+  };
+
+  /** Chỉ hiện khi đang xem note: nút nổi khi popover đóng, popover khi mở. */
+  const fabSel = () => (view() === "editor" && current() && !aiOpen() ? sel() : null);
+  const popSel = () => (view() === "editor" && current() && aiOpen() ? sel() : null);
+
+  const openAi = () => {
+    if (!sel()) return;
+    setAiError("");
+    setAiPrompt("");
+    setAiOpen(true);
+    queueMicrotask(() => aiInput?.focus());
+  };
+
+  /** Nhờ agent viết lại đúng vùng chọn rồi thay tại chỗ (transaction → Ctrl+Z hoàn tác). */
+  const runAi = async (instruction: string) => {
+    const s = sel();
+    if (!s || aiBusy() || !instruction.trim()) return;
+    // Nội dung có thể đã đổi trong lúc chờ agent → không thay bừa vào vị trí cũ.
+    if (editor.getContent().slice(s.from, s.to) !== s.text) {
+      setAiError("Nội dung đã thay đổi — chọn lại đoạn cần sửa");
+      return;
+    }
+    setAiBusy(true);
+    setAiError("");
+    try {
+      const out = await api.agentTransform(s.text, instruction, currentPath);
+      setAiOpen(false);
+      setAiPrompt("");
+      editor.replaceRange(s.from, s.to, out);
+      say("Đã sửa vùng chọn bằng AI — Ctrl+Z để hoàn tác");
+    } catch (e) {
+      setAiError(String(e));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  /** Đẩy vùng chọn sang chat Agent — cho yêu cầu phức tạp (cần đọc note khác, tách file…). */
+  const sendSelToChat = () => {
+    const s = sel();
+    if (!s) return;
+    setChatSel({ text: s.text, path: currentPath });
+    setAiOpen(false);
+    if (!chatOpen()) toggleChat();
+  };
+
   /** Mở modal 🕘 lịch sử phiên bản của note đang mở. */
   const openHistory = async () => {
     const p = current();
@@ -773,6 +846,10 @@ export default function App() {
       getNotes: notes,
       onSave: saveCurrent,
       onOpenLink: openByTarget,
+      onSelection: (s) => {
+        setSel(s);
+        if (!s) setAiOpen(false);
+      },
     });
 
     const saved = localStorage.getItem("vaultPath");
@@ -820,10 +897,14 @@ export default function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w") {
         e.preventDefault();
         closeTab(activeId());
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        openAi();
       } else if ((e.ctrlKey || e.metaKey) && e.key === "`") {
         e.preventDefault();
         setTermVisible((v) => !v);
       } else if (e.key === "Escape") {
+        setAiOpen(false);
         setOmniOpen(false);
         setPromptCfg(null);
         setSettingsOpen(false);
@@ -1024,9 +1105,71 @@ export default function App() {
         </Show>
       </aside>
 
+      {/* Vùng chọn trong note → nút nổi "Sửa bằng AI" (Ctrl+Shift+L) */}
+      <Show when={fabSel()}>
+        {(s) => (
+          <button class="sel-fab" style={anchor(s(), 210, 30)} onClick={openAi}>
+            🤖 Sửa bằng AI <span class="sel-kbd">Ctrl+Shift+L</span>
+          </button>
+        )}
+      </Show>
+
+      <Show when={popSel()}>
+        {(s) => (
+          <div class="sel-pop" style={anchor(s(), 360, 190)}>
+            <div class="sel-pop-head">
+              <span>🤖 Sửa {s().text.length} ký tự đã chọn</span>
+              <button title="Đóng (Esc)" onClick={() => setAiOpen(false)}>
+                ×
+              </button>
+            </div>
+            <input
+              ref={aiInput}
+              placeholder="VD: format thành table markdown"
+              value={aiPrompt()}
+              disabled={aiBusy()}
+              onInput={(e) => setAiPrompt(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  runAi(aiPrompt());
+                }
+              }}
+            />
+            <div class="sel-pop-actions">
+              <For each={SELECTION_ACTIONS}>
+                {(a) => (
+                  <button class="sel-chip" disabled={aiBusy()} onClick={() => runAi(a.prompt)}>
+                    {a.label}
+                  </button>
+                )}
+              </For>
+            </div>
+            <div class="sel-pop-foot">
+              <Show
+                when={aiBusy()}
+                fallback={<span class="sel-hint">Enter để chạy · thay tại chỗ, Ctrl+Z hoàn tác</span>}
+              >
+                <span class="sel-hint">
+                  <span class="chat-spinner" /> agent đang viết lại…
+                </span>
+              </Show>
+              <button class="sel-tochat" disabled={aiBusy()} onClick={sendSelToChat}>
+                ➤ Gửi vào chat Agent
+              </button>
+            </div>
+            <Show when={aiError()}>
+              <div class="sel-error">{aiError()}</div>
+            </Show>
+          </div>
+        )}
+      </Show>
+
       <ChatPanel
         visible={chatOpen()}
         currentPath={current()}
+        selection={chatSel()}
+        onClearSelection={() => setChatSel(null)}
         onVaultChanged={vaultChanged}
         onClose={toggleChat}
       />

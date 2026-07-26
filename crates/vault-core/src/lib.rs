@@ -5,6 +5,7 @@
 
 pub mod db;
 pub mod parser;
+pub mod proc;
 pub mod vault;
 pub mod watcher;
 
