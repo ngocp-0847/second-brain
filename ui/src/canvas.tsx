@@ -2,10 +2,24 @@
 // - Đủ 4 loại node: text / file / link / group; z-order theo thứ tự mảng (spec)
 // - Edge: fromSide/toSide 4 cạnh, fromEnd/toEnd, color, label; kéo lại 2 đầu khi chọn
 // - Pan: kéo nền hoặc lăn chuột (shift = ngang) · zoom: Ctrl+lăn về phía con trỏ
-// - Mở file là tự fit viewport vào nội dung; field lạ trong file được giữ nguyên khi lưu
+// - Mở file là tự fit viewport vào nội dung; field lạ trong node được giữ nguyên khi lưu
+// - `shape` trên node text là extension NGOÀI spec: Obsidian bỏ qua và hiện card chữ nhật
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api } from "./api";
+
+export type ShapeKind =
+  | "rect"
+  | "rounded"
+  | "ellipse"
+  | "diamond"
+  | "parallelogram"
+  | "hexagon"
+  | "sticky"
+  | "triangle"
+  | "star"
+  | "cylinder"
+  | "arrow";
 
 export interface CanvasNode {
   id: string;
@@ -20,6 +34,8 @@ export interface CanvasNode {
   url?: string;
   label?: string;
   color?: string;
+  /** Ngoài spec JSON Canvas 1.0 — Obsidian bỏ qua, node hiện thành card chữ nhật. */
+  shape?: ShapeKind;
 }
 
 export interface CanvasEdge {
@@ -41,8 +57,13 @@ interface CanvasDoc {
 
 type Side = "left" | "right" | "top" | "bottom";
 type Anchor = { x: number; y: number; dx: number; dy: number };
+type Box = { x: number; y: number; w: number; h: number };
+type Tool = { kind: "select" } | { kind: "text" } | { kind: "shape"; shape: ShapeKind };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+/** Số bước undo giữ lại. */
+const HISTORY_MAX = 100;
 
 // Bảng màu preset chuẩn JSON Canvas ("1".."6"), tông hợp dark theme.
 const PALETTE: Record<string, string> = {
@@ -56,6 +77,113 @@ const PALETTE: Record<string, string> = {
 
 const EDGE_DEFAULT = "#4a5170";
 const EDGE_SELECTED = "#a48fff";
+
+// ---- shape: vẽ trong hệ toạ độ world của node (viewBox = 0 0 w h) nên stroke không méo ----
+const shapePath = (k: ShapeKind, w: number, h: number): string => {
+  switch (k) {
+    case "rect":
+      return `M0 0 H${w} V${h} H0 Z`;
+    case "rounded":
+    case "sticky": {
+      const r = Math.min(k === "sticky" ? 4 : 10, w / 2, h / 2);
+      return (
+        `M${r} 0 H${w - r} A${r} ${r} 0 0 1 ${w} ${r} V${h - r} ` +
+        `A${r} ${r} 0 0 1 ${w - r} ${h} H${r} A${r} ${r} 0 0 1 0 ${h - r} ` +
+        `V${r} A${r} ${r} 0 0 1 ${r} 0 Z`
+      );
+    }
+    case "ellipse": {
+      const rx = w / 2;
+      const ry = h / 2;
+      return `M0 ${ry} A${rx} ${ry} 0 1 0 ${w} ${ry} A${rx} ${ry} 0 1 0 0 ${ry} Z`;
+    }
+    case "diamond":
+      return `M${w / 2} 0 L${w} ${h / 2} L${w / 2} ${h} L0 ${h / 2} Z`;
+    case "parallelogram": {
+      const k2 = Math.min(w * 0.2, h * 0.6);
+      return `M${k2} 0 H${w} L${w - k2} ${h} H0 Z`;
+    }
+    case "hexagon": {
+      const k2 = Math.min(w * 0.22, h / 2);
+      return `M${k2} 0 H${w - k2} L${w} ${h / 2} L${w - k2} ${h} H${k2} L0 ${h / 2} Z`;
+    }
+    case "triangle":
+      return `M${w / 2} 0 L${w} ${h} H0 Z`;
+    case "star": {
+      const cx = w / 2;
+      const cy = h / 2;
+      const pts: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const a = -Math.PI / 2 + (i * Math.PI) / 5;
+        const f = i % 2 === 0 ? 1 : 0.42;
+        pts.push(`${cx + Math.cos(a) * cx * f} ${cy + Math.sin(a) * cy * f}`);
+      }
+      return `M${pts.join(" L")} Z`;
+    }
+    case "cylinder": {
+      const ry = Math.min(h * 0.18, w * 0.5);
+      return (
+        `M0 ${ry} A${w / 2} ${ry} 0 0 0 ${w} ${ry} V${h - ry} ` +
+        `A${w / 2} ${ry} 0 0 1 0 ${h - ry} Z`
+      );
+    }
+    case "arrow": {
+      const hw = Math.min(w * 0.32, h * 0.9);
+      return `M0 ${h * 0.26} H${w - hw} V0 L${w} ${h / 2} L${w - hw} ${h} V${h * 0.74} H0 Z`;
+    }
+  }
+};
+
+/** Nét phụ không tô (hiện chỉ có nắp trên của hình trụ). */
+const shapeDetail = (k: ShapeKind, w: number, h: number): string | null => {
+  if (k !== "cylinder") return null;
+  const ry = Math.min(h * 0.18, w * 0.5);
+  return `M0 ${ry} A${w / 2} ${ry} 0 0 1 ${w} ${ry}`;
+};
+
+const SHAPE_DEFAULT: Record<ShapeKind, [number, number]> = {
+  rect: [200, 120],
+  rounded: [200, 120],
+  ellipse: [180, 120],
+  diamond: [180, 130],
+  parallelogram: [200, 110],
+  hexagon: [200, 110],
+  sticky: [200, 200],
+  triangle: [180, 150],
+  star: [160, 160],
+  cylinder: [160, 150],
+  arrow: [210, 100],
+};
+
+/** Padding nội dung để chữ không tràn ra ngoài viền shape. */
+const SHAPE_INSET: Record<ShapeKind, string> = {
+  rect: "10px 14px",
+  rounded: "10px 14px",
+  sticky: "14px 16px",
+  ellipse: "14% 16%",
+  diamond: "24% 22%",
+  parallelogram: "12% 22%",
+  hexagon: "12% 20%",
+  triangle: "40% 16% 8%",
+  star: "32% 27%",
+  cylinder: "24% 14% 18%",
+  arrow: "16% 32% 16% 10%",
+};
+
+/** Thứ tự hiện trong popover chọn shape (grid 4 cột). */
+const SHAPES: { kind: ShapeKind; label: string }[] = [
+  { kind: "rect", label: "Chữ nhật" },
+  { kind: "rounded", label: "Chữ nhật bo tròn" },
+  { kind: "ellipse", label: "Ellipse / tròn" },
+  { kind: "diamond", label: "Hình thoi (quyết định)" },
+  { kind: "parallelogram", label: "Bình hành (dữ liệu)" },
+  { kind: "hexagon", label: "Lục giác" },
+  { kind: "triangle", label: "Tam giác" },
+  { kind: "star", label: "Ngôi sao" },
+  { kind: "cylinder", label: "Trụ (database)" },
+  { kind: "arrow", label: "Mũi tên khối" },
+  { kind: "sticky", label: "Giấy nhớ" },
+];
 
 // ---- text card: URL trần, [label](url), [[wikilink]] bấm được (chỉ khâu hiển thị,
 // nội dung text giữ nguyên trong file .canvas — tương thích Obsidian) ----
@@ -175,6 +303,63 @@ function CanvasImage(props: { path: string }) {
 const resolveColor = (c?: string) => (c ? PALETTE[c] ?? (c.startsWith("#") ? c : null) : null);
 const cardColor = (n: CanvasNode) => resolveColor(n.color);
 
+/** Lớp nền SVG của node có shape. Không dùng clip-path vì nó cắt mất card-toolbar + port. */
+function ShapeLayer(props: { node: CanvasNode; tint: string | null }) {
+  const kind = () => props.node.shape as ShapeKind;
+  const sticky = () => kind() === "sticky";
+  const fill = () =>
+    sticky()
+      ? props.tint ?? PALETTE["3"]
+      : props.tint
+        ? `${props.tint}1a`
+        : "var(--bg-panel)";
+  const stroke = () => (sticky() ? "transparent" : props.tint ?? "var(--border-card)");
+  const d = () => shapePath(kind(), props.node.width, props.node.height);
+  const detail = () => shapeDetail(kind(), props.node.width, props.node.height);
+  return (
+    <svg
+      class="canvas-shape"
+      viewBox={`0 0 ${props.node.width} ${props.node.height}`}
+      preserveAspectRatio="none"
+    >
+      <path
+        d={d()}
+        fill={fill()}
+        stroke={stroke()}
+        stroke-width="1.5"
+        stroke-linejoin="round"
+        vector-effect="non-scaling-stroke"
+      />
+      <Show when={detail()}>
+        {(dd) => (
+          <path
+            d={dd()}
+            fill="none"
+            stroke={stroke()}
+            stroke-width="1.5"
+            vector-effect="non-scaling-stroke"
+          />
+        )}
+      </Show>
+    </svg>
+  );
+}
+
+/** Icon shape trong toolbar — dùng lại chính shapePath() nên luôn khớp với hình thật. */
+const ShapeGlyph = (props: { kind: ShapeKind }) => (
+  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+    <path
+      d={shapePath(props.kind, 16, 16)}
+      transform="translate(2,2)"
+      fill={props.kind === "sticky" ? "currentColor" : "none"}
+      fill-opacity={props.kind === "sticky" ? "0.28" : "0"}
+    />
+    <Show when={shapeDetail(props.kind, 16, 16)}>
+      {(d) => <path d={d()} transform="translate(2,2)" fill="none" />}
+    </Show>
+  </svg>
+);
+
 const IconTextCard = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
     <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
@@ -204,6 +389,47 @@ const IconTrash = () => (
   </svg>
 );
 
+const IconCursor = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+    <path d="M5.5 3.5 18 11.2l-5.4 1.4-2.6 5.2z" />
+  </svg>
+);
+
+const IconSticky = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+    <path d="M4.5 5.5A1 1 0 0 1 5.5 4.5h13a1 1 0 0 1 1 1v8.5L14 19.5H5.5a1 1 0 0 1-1-1Z" />
+    <path d="M19.5 14H15a1 1 0 0 0-1 1v4.5" />
+  </svg>
+);
+
+const IconCaret = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 15.5 12 10l5 5.5" />
+  </svg>
+);
+
+const IconUndo = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 7.5H14.5a5 5 0 0 1 0 10H8.5" />
+    <path d="M10.8 4.5 7.5 7.5l3.3 3" />
+  </svg>
+);
+
+const IconRedo = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 7.5H9.5a5 5 0 0 0 0 10h6" />
+    <path d="M13.2 4.5 16.5 7.5l-3.3 3" />
+  </svg>
+);
+
+const IconHelp = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M9.6 9.4a2.5 2.5 0 1 1 3.2 2.5c-.6.2-.9.7-.9 1.3v.5" />
+    <path d="M12 16.7h.01" />
+  </svg>
+);
+
 export function CanvasView(props: {
   path: string;
   onOpenNote: (path: string) => void;
@@ -216,6 +442,20 @@ export function CanvasView(props: {
   const [editing, setEditing] = createSignal<string | null>(null);
   const [selectedEdge, setSelectedEdge] = createSignal<string | null>(null);
   const [selectedCard, setSelectedCard] = createSignal<string | null>(null);
+  // Tool đang chọn: "select" = pan/kéo như cũ; còn lại là chế độ đặt node (click hoặc kéo trên nền).
+  const [tool, setTool] = createSignal<Tool>({ kind: "select" });
+  const [lastShape, setLastShape] = createSignal<ShapeKind>("rect");
+  const [shapeMenu, setShapeMenu] = createSignal(false);
+  // Node đang mở bảng đổi shape trên card-toolbar (null = không mở).
+  const [shapePick, setShapePick] = createSignal<string | null>(null);
+  const [helpOpen, setHelpOpen] = createSignal(false);
+  // Khung nét đứt xem trước khi kéo vẽ kích thước.
+  const [draft, setDraft] = createSignal<Box | null>(null);
+  let placeStart: { x: number; y: number } | null = null;
+  // Lịch sử undo/redo: chồng ảnh chụp CanvasDoc (doc bất biến nên chụp = giữ tham chiếu).
+  const [past, setPast] = createSignal<CanvasDoc[]>([]);
+  const [future, setFuture] = createSignal<CanvasDoc[]>([]);
+  let gestureKey: string | null = null;
   // Đang kéo dây: đầu cố định + đầu di động (tạo edge mới hoặc dời một đầu edge cũ).
   const [linking, setLinking] = createSignal<{
     fixedNode: string;
@@ -236,8 +476,48 @@ export function CanvasView(props: {
     );
   };
 
-  const mutate = (f: (d: CanvasDoc) => CanvasDoc) => {
+  /** Ghi lịch sử rồi đổi doc.
+   *  `key` gom cả một thao tác liên tục (kéo card, resize) thành MỘT bước undo:
+   *  các lần mutate cùng key liên tiếp chỉ chụp ảnh trạng thái ở lần đầu.
+   *  Kết thúc thao tác (mouseup) gọi endGesture() để mở lại. */
+  const mutate = (f: (d: CanvasDoc) => CanvasDoc, key?: string) => {
+    if (!key || key !== gestureKey) {
+      setPast((p) => [...p.slice(-(HISTORY_MAX - 1)), doc()]);
+      setFuture([]);
+      gestureKey = key ?? null;
+    }
     setDoc(f(doc()));
+    scheduleSave();
+  };
+  const endGesture = () => {
+    gestureKey = null;
+  };
+
+  /** Undo/redo đổi cả mảng nodes nên bỏ luôn selection để không trỏ vào node đã biến mất. */
+  const clearTransient = () => {
+    setEditing(null);
+    setSelectedCard(null);
+    setSelectedEdge(null);
+    setShapePick(null);
+  };
+  const undo = () => {
+    const p = past();
+    if (!p.length) return;
+    endGesture();
+    setFuture((f) => [...f, doc()]);
+    setPast(p.slice(0, -1));
+    setDoc(p[p.length - 1]);
+    clearTransient();
+    scheduleSave();
+  };
+  const redo = () => {
+    const f = future();
+    if (!f.length) return;
+    endGesture();
+    setPast((p) => [...p.slice(-(HISTORY_MAX - 1)), doc()]);
+    setFuture(f.slice(0, -1));
+    setDoc(f[f.length - 1]);
+    clearTransient();
     scheduleSave();
   };
 
@@ -269,8 +549,22 @@ export function CanvasView(props: {
     }
     fitView();
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl/Cmd+Z undo · Ctrl+Shift+Z hoặc Ctrl+Y redo. Đang gõ trong ô nhập thì
+      // nhường cho undo mặc định của textarea/input.
+      if ((e.ctrlKey || e.metaKey) && /^[zy]$/i.test(e.key)) {
+        const ae = document.activeElement;
+        if (editing() || ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) return;
+        e.preventDefault();
+        if (e.key.toLowerCase() === "y" || e.shiftKey) redo();
+        else undo();
+        return;
+      }
       if (e.key === "Escape") {
         setLinking(null);
+        cancelPlacing();
+        setShapeMenu(false);
+        setHelpOpen(false);
+        setShapePick(null);
         return;
       }
       if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -333,15 +627,50 @@ export function CanvasView(props: {
   const isBackground = (t: EventTarget | null) =>
     !(t instanceof Element && t.closest(".canvas-card, .canvas-group, .card-toolbar, .canvas-toolbar"));
 
+  const cancelPlacing = () => {
+    placeStart = null;
+    setDraft(null);
+    setTool({ kind: "select" });
+  };
+  const isShapeTool = (k: ShapeKind) => {
+    const t = tool();
+    return t.kind === "shape" && t.shape === k;
+  };
+
   const onBgDown = (e: MouseEvent) => {
     if (!isBackground(e.target)) return;
+    setShapeMenu(false);
+    setHelpOpen(false);
+    setShapePick(null);
     setSelectedEdge(null);
     setSelectedCard(null);
+    if (tool().kind !== "select") {
+      // Đang ở chế độ đặt: click = kích thước mặc định, kéo = vẽ theo bbox. Không pan.
+      const w = toWorld(e.clientX, e.clientY);
+      placeStart = { x: w.x, y: w.y };
+      setDraft({ x: w.x, y: w.y, w: 0, h: 0 });
+      return;
+    }
     panning = true;
     lastX = e.clientX;
     lastY = e.clientY;
   };
   const onMove = (e: MouseEvent) => {
+    if (resizing) {
+      const w = toWorld(e.clientX, e.clientY);
+      applyResize(w.x, w.y);
+      return;
+    }
+    if (placeStart) {
+      const w = toWorld(e.clientX, e.clientY);
+      setDraft({
+        x: Math.min(placeStart.x, w.x),
+        y: Math.min(placeStart.y, w.y),
+        w: Math.abs(w.x - placeStart.x),
+        h: Math.abs(w.y - placeStart.y),
+      });
+      return;
+    }
     const l = linking();
     if (l) {
       const w = toWorld(e.clientX, e.clientY);
@@ -354,16 +683,38 @@ export function CanvasView(props: {
     } else if (dragging) {
       const w = toWorld(e.clientX, e.clientY);
       const byId = new Map(dragging.map((g) => [g.id, g]));
-      mutate((d) => ({
-        ...d,
-        nodes: d.nodes.map((n) => {
-          const g = byId.get(n.id);
-          return g ? { ...n, x: Math.round(w.x - g.dx), y: Math.round(w.y - g.dy) } : n;
+      mutate(
+        (d) => ({
+          ...d,
+          nodes: d.nodes.map((n) => {
+            const g = byId.get(n.id);
+            return g ? { ...n, x: Math.round(w.x - g.dx), y: Math.round(w.y - g.dy) } : n;
+          }),
         }),
-      }));
+        "drag",
+      );
     }
   };
   const onUp = (e: MouseEvent) => {
+    endGesture();
+    if (resizing) {
+      resizing = null;
+      return;
+    }
+    if (placeStart) {
+      const t = tool();
+      const kind = t.kind === "shape" ? t.shape : null;
+      const [dw, dh] = kind ? SHAPE_DEFAULT[kind] : [260, 90];
+      const d = draft();
+      // Kéo dưới 12px world coi như click đơn → dùng kích thước mặc định, tâm tại điểm bấm.
+      const box =
+        d && d.w >= 12 && d.h >= 12
+          ? d
+          : { x: placeStart.x - dw / 2, y: placeStart.y - dh / 2, w: dw, h: dh };
+      cancelPlacing();
+      createNode(kind, box);
+      return;
+    }
     const l = linking();
     if (l) {
       const el = e.target instanceof Element ? e.target.closest("[data-node-id]") : null;
@@ -420,20 +771,29 @@ export function CanvasView(props: {
       setOy(oy() - e.deltaY);
     }
   };
-  const newTextCard = (wx: number, wy: number) => {
+  /** Tạo node text (kind = null) hoặc node có shape, rồi vào chế độ gõ chữ ngay. */
+  const createNode = (kind: ShapeKind | null, b: Box) => {
     const id = uid();
-    mutate((d) => ({
-      ...d,
-      nodes: [
-        ...d.nodes,
-        { id, type: "text", x: Math.round(wx) - 130, y: Math.round(wy) - 45, width: 260, height: 90, text: "" },
-      ],
-    }));
-    setEditing(id);
+    const node: CanvasNode = {
+      id,
+      type: "text",
+      x: Math.round(b.x),
+      y: Math.round(b.y),
+      width: Math.round(b.w),
+      height: Math.round(b.h),
+      text: "",
+      ...(kind ? { shape: kind } : {}),
+      ...(kind === "sticky" ? { color: "3" } : {}), // giấy nhớ mặc định màu vàng
+    };
+    mutate((d) => ({ ...d, nodes: [...d.nodes, node] }));
     setSelectedCard(id);
+    setEditing(id);
   };
+  const newTextCard = (wx: number, wy: number) =>
+    createNode(null, { x: wx - 130, y: wy - 45, w: 260, h: 90 });
   const onDblClick = (e: MouseEvent) => {
     if (!isBackground(e.target)) return;
+    if (tool().kind !== "select") return;
     const w = toWorld(e.clientX, e.clientY);
     newTextCard(w.x, w.y);
   };
@@ -443,6 +803,7 @@ export function CanvasView(props: {
   const onCardDown = (e: MouseEvent, n: CanvasNode) => {
     if (editing() === n.id) return;
     e.stopPropagation();
+    if (selectedCard() !== n.id) setShapePick(null);
     setSelectedEdge(null);
     setSelectedCard(n.id);
     const w = toWorld(e.clientX, e.clientY);
@@ -551,6 +912,62 @@ export function CanvasView(props: {
       nodes: d.nodes.map((n) => (n.id === id ? { ...n, color } : n)),
     }));
 
+  /** Đổi shape của node text đã vẽ; `undefined` = trả về card chữ nhật thường. */
+  const setShape = (id: string, shape: ShapeKind | undefined) =>
+    mutate((d) => ({
+      ...d,
+      nodes: d.nodes.map((n) => {
+        if (n.id !== id) return n;
+        const { shape: _drop, ...rest } = n;
+        return shape ? { ...rest, shape } : rest;
+      }),
+    }));
+
+  // ---- resize: 8 tay nắm quanh node đang chọn ----
+  const MIN_SIZE = 40;
+  let resizing: { id: string; dir: string; start: CanvasNode } | null = null;
+  const startResize = (e: MouseEvent, n: CanvasNode, dir: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setSelectedEdge(null);
+    setSelectedCard(n.id);
+    resizing = { id: n.id, dir, start: { ...n } };
+  };
+  const applyResize = (wx: number, wy: number) => {
+    const r = resizing!;
+    const s = r.start;
+    let { x, y, width, height } = s;
+    if (r.dir.includes("w")) {
+      const right = s.x + s.width;
+      x = Math.min(wx, right - MIN_SIZE);
+      width = right - x;
+    }
+    if (r.dir.includes("e")) width = Math.max(MIN_SIZE, wx - s.x);
+    if (r.dir.includes("n")) {
+      const bottom = s.y + s.height;
+      y = Math.min(wy, bottom - MIN_SIZE);
+      height = bottom - y;
+    }
+    if (r.dir.includes("s")) height = Math.max(MIN_SIZE, wy - s.y);
+    mutate(
+      (d) => ({
+        ...d,
+        nodes: d.nodes.map((n) =>
+          n.id === r.id
+            ? {
+                ...n,
+                x: Math.round(x),
+                y: Math.round(y),
+                width: Math.round(width),
+                height: Math.round(height),
+              }
+            : n,
+        ),
+      }),
+      "resize",
+    );
+  };
+
   const nodeCenter = (nodeId: string) => {
     const n = doc().nodes.find((x) => x.id === nodeId);
     return n ? { x: n.x + n.width / 2, y: n.y + n.height / 2 } : { x: 0, y: 0 };
@@ -629,6 +1046,7 @@ export function CanvasView(props: {
     <div
       ref={host}
       class="canvas-host"
+      classList={{ placing: tool().kind !== "select" }}
       onMouseDown={onBgDown}
       onMouseMove={onMove}
       onMouseUp={onUp}
@@ -755,62 +1173,81 @@ export function CanvasView(props: {
                       </button>
                     </div>
                   </Show>
+                  <Show when={selectedCard() === n.id}>
+                    <For each={["nw", "ne", "se", "sw"]}>
+                      {(dir) => (
+                        <div
+                          class={`canvas-resize ${dir}`}
+                          title="Kéo để đổi kích thước"
+                          onMouseDown={(e) => startResize(e, n, dir)}
+                        />
+                      )}
+                    </For>
+                  </Show>
                   <span class="canvas-group-label" style={tint() ? { color: tint()! } : {}}>
                     {n.label || "Group"}
                   </span>
                 </div>
               );
             }
-            return (
-              <div
-                class="canvas-card"
-                classList={{
-                  "canvas-file": n.type === "file",
-                  selected: selectedCard() === n.id,
-                }}
-                data-node-id={n.id}
-                style={{
-                  left: `${n.x}px`,
-                  top: `${n.y}px`,
-                  width: `${n.width}px`,
-                  height: `${n.height}px`,
-                  ...(tint()
-                    ? { "border-color": tint()!, background: `${tint()}1a` }
-                    : {}),
-                }}
-                onMouseDown={(e) => onCardDown(e, n)}
-                onDblClick={(e) => {
-                  e.stopPropagation();
-                  if (n.type === "text") setEditing(n.id);
-                  else if (n.type === "file" && n.file && !isImagePath(n.file)) props.onOpenNote(n.file);
-                  else if (n.type === "link" && n.url) window.open(n.url, "_blank");
-                }}
-              >
-                {/* Toolbar nổi khi card được chọn: 6 màu + bỏ màu + xóa */}
-                <Show when={selectedCard() === n.id && editing() !== n.id}>
-                  <div class="card-toolbar" onMouseDown={(e) => e.stopPropagation()}>
-                    <For each={Object.entries(PALETTE)}>
-                      {([key, hex]) => (
+            // Node text có `shape` → nền là lớp SVG, card chỉ còn vai trò hit-box.
+            const shaped = () => n.type === "text" && !!n.shape;
+            // Chỉ 4 góc: 4 điểm giữa cạnh đã bị .canvas-port chiếm chỗ.
+            const Handles = () => (
+              <For each={["nw", "ne", "se", "sw"]}>
+                {(dir) => (
+                  <div
+                    class={`canvas-resize ${dir}`}
+                    title="Kéo để đổi kích thước"
+                    onMouseDown={(e) => startResize(e, n, dir)}
+                  />
+                )}
+              </For>
+            );
+            const ShapePicker = () => (
+              <div class="ct-group">
+                <button
+                  class="card-toolbar-btn card-shape-btn"
+                  classList={{ open: shapePick() === n.id }}
+                  title="Đổi hình khối"
+                  onClick={() => setShapePick(shapePick() === n.id ? null : n.id)}
+                >
+                  <ShapeGlyph kind={n.shape ?? "rounded"} />
+                </button>
+                <Show when={shapePick() === n.id}>
+                  <div class="ct-popover ct-shape-grid">
+                    <button
+                      class="ct-shape-item"
+                      classList={{ active: !n.shape }}
+                      title="Card thường (bỏ hình khối)"
+                      onClick={() => {
+                        setShape(n.id, undefined);
+                        setShapePick(null);
+                      }}
+                    >
+                      <IconTextCard />
+                    </button>
+                    <For each={SHAPES}>
+                      {(s) => (
                         <button
-                          class="color-dot"
-                          classList={{ active: n.color === key }}
-                          style={{ background: hex }}
-                          title={`Màu ${key}`}
-                          onClick={() => setColor(n.id, key)}
-                        />
+                          class="ct-shape-item"
+                          classList={{ active: n.shape === s.kind }}
+                          title={s.label}
+                          onClick={() => {
+                            setShape(n.id, s.kind);
+                            setShapePick(null);
+                          }}
+                        >
+                          <ShapeGlyph kind={s.kind} />
+                        </button>
                       )}
                     </For>
-                    <button class="color-dot none" title="Bỏ màu" onClick={() => setColor(n.id, undefined)} />
-                    <span class="card-toolbar-sep" />
-                    <button class="card-toolbar-btn" title="Xóa card (Delete)" onClick={() => removeCard(n.id)}>
-                      <IconTrash />
-                    </button>
                   </div>
                 </Show>
-                <div class="canvas-port left" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "left")} />
-                <div class="canvas-port right" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "right")} />
-                <div class="canvas-port top" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "top")} />
-                <div class="canvas-port bottom" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "bottom")} />
+              </div>
+            );
+            const Content = () => (
+              <>
                 {n.type === "file" && isImagePath(n.file) ? (
                   <CanvasImage path={n.file!} />
                 ) : n.type === "file" ? (
@@ -848,33 +1285,223 @@ export function CanvasView(props: {
                     </Show>
                   </div>
                 )}
+              </>
+            );
+            return (
+              <div
+                class="canvas-card"
+                classList={{
+                  "canvas-file": n.type === "file",
+                  "canvas-shaped": shaped(),
+                  "canvas-sticky": n.shape === "sticky",
+                  selected: selectedCard() === n.id,
+                }}
+                data-node-id={n.id}
+                style={{
+                  left: `${n.x}px`,
+                  top: `${n.y}px`,
+                  width: `${n.width}px`,
+                  height: `${n.height}px`,
+                  // Node có shape: màu nằm trong SVG, không tô lên card.
+                  ...(tint() && !shaped()
+                    ? { "border-color": tint()!, background: `${tint()}1a` }
+                    : {}),
+                }}
+                onMouseDown={(e) => onCardDown(e, n)}
+                onDblClick={(e) => {
+                  e.stopPropagation();
+                  if (n.type === "text") setEditing(n.id);
+                  else if (n.type === "file" && n.file && !isImagePath(n.file)) props.onOpenNote(n.file);
+                  else if (n.type === "link" && n.url) window.open(n.url, "_blank");
+                }}
+              >
+                {/* Toolbar nổi khi card được chọn: 6 màu + bỏ màu + xóa */}
+                <Show when={selectedCard() === n.id && editing() !== n.id}>
+                  <div class="card-toolbar" onMouseDown={(e) => e.stopPropagation()}>
+                    <For each={Object.entries(PALETTE)}>
+                      {([key, hex]) => (
+                        <button
+                          class="color-dot"
+                          classList={{ active: n.color === key }}
+                          style={{ background: hex }}
+                          title={`Màu ${key}`}
+                          onClick={() => setColor(n.id, key)}
+                        />
+                      )}
+                    </For>
+                    <button class="color-dot none" title="Bỏ màu" onClick={() => setColor(n.id, undefined)} />
+                    <Show when={n.type === "text"}>
+                      <span class="card-toolbar-sep" />
+                      <ShapePicker />
+                    </Show>
+                    <span class="card-toolbar-sep" />
+                    <button class="card-toolbar-btn" title="Xóa card (Delete)" onClick={() => removeCard(n.id)}>
+                      <IconTrash />
+                    </button>
+                  </div>
+                </Show>
+                <Show when={selectedCard() === n.id && editing() !== n.id}>
+                  <Handles />
+                </Show>
+                <div class="canvas-port left" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "left")} />
+                <div class="canvas-port right" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "right")} />
+                <div class="canvas-port top" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "top")} />
+                <div class="canvas-port bottom" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "bottom")} />
+                <Show when={shaped()} fallback={<div class="canvas-card-body"><Content /></div>}>
+                  <ShapeLayer node={n} tint={tint()} />
+                  <div class="canvas-shape-body" style={{ padding: SHAPE_INSET[n.shape!] }}>
+                    <Content />
+                  </div>
+                </Show>
               </div>
             );
           }}
         </For>
+        {/* Preview khi kéo: vẽ đúng hình của tool đang chọn, co giãn theo chuột */}
+        <Show when={draft()}>
+          {(d) => {
+            const t = tool();
+            const kind = t.kind === "shape" ? t.shape : "rounded";
+            const w = () => Math.max(d().w, 1);
+            const h = () => Math.max(d().h, 1);
+            return (
+              <svg
+                class="canvas-draft"
+                style={{ left: `${d().x}px`, top: `${d().y}px`, width: `${w()}px`, height: `${h()}px` }}
+                viewBox={`0 0 ${w()} ${h()}`}
+                preserveAspectRatio="none"
+              >
+                <path d={shapePath(kind, w(), h())} vector-effect="non-scaling-stroke" />
+                <Show when={shapeDetail(kind, w(), h())}>
+                  {(dd) => <path d={dd()} class="detail" vector-effect="non-scaling-stroke" />}
+                </Show>
+              </svg>
+            );
+          }}
+        </Show>
       </div>
-      <div class="canvas-toolbar">
+      <div class="canvas-toolbar" onMouseDown={(e) => e.stopPropagation()}>
         <button
-          title="Thêm card text"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const rect = host.getBoundingClientRect();
-            const w = toWorld(rect.left + host.clientWidth / 2, rect.top + host.clientHeight / 3);
-            newTextCard(w.x, w.y);
+          class="ct-btn"
+          title="Hoàn tác (Ctrl+Z)"
+          disabled={past().length === 0}
+          onClick={undo}
+        >
+          <IconUndo />
+        </button>
+        <button
+          class="ct-btn"
+          title="Làm lại (Ctrl+Shift+Z)"
+          disabled={future().length === 0}
+          onClick={redo}
+        >
+          <IconRedo />
+        </button>
+        <span class="ct-sep" />
+        <button
+          class="ct-btn"
+          classList={{ active: tool().kind === "select" }}
+          title="Chọn / di chuyển (Esc)"
+          onClick={() => cancelPlacing()}
+        >
+          <IconCursor />
+        </button>
+        <span class="ct-sep" />
+        <button
+          class="ct-btn"
+          classList={{ active: tool().kind === "text" }}
+          title="Card text — click hoặc kéo trên canvas để đặt"
+          onClick={() => {
+            setShapeMenu(false);
+            setTool({ kind: "text" });
           }}
         >
           <IconTextCard />
         </button>
-        <button title="Thêm note từ vault" onMouseDown={(e) => e.stopPropagation()} onClick={addNoteCard}>
+        <button
+          class="ct-btn"
+          classList={{ active: isShapeTool("sticky") }}
+          title="Giấy nhớ — click hoặc kéo trên canvas để đặt"
+          onClick={() => {
+            setShapeMenu(false);
+            setTool({ kind: "shape", shape: "sticky" });
+          }}
+        >
+          <IconSticky />
+        </button>
+        <div class="ct-group">
+          <button
+            class="ct-btn ct-btn-split"
+            classList={{ active: tool().kind === "shape" && !isShapeTool("sticky") }}
+            title="Hình khối — chọn loại rồi click/kéo trên canvas"
+            onClick={() => {
+              setTool({ kind: "shape", shape: lastShape() });
+              setShapeMenu(!shapeMenu());
+            }}
+          >
+            <ShapeGlyph kind={lastShape()} />
+            <IconCaret />
+          </button>
+          <Show when={shapeMenu()}>
+            <div class="ct-popover ct-shape-grid">
+              <For each={SHAPES}>
+                {(s) => (
+                  <button
+                    class="ct-shape-item"
+                    classList={{ active: isShapeTool(s.kind) }}
+                    title={s.label}
+                    onClick={() => {
+                      if (s.kind !== "sticky") setLastShape(s.kind);
+                      setTool({ kind: "shape", shape: s.kind });
+                      setShapeMenu(false);
+                    }}
+                  >
+                    <ShapeGlyph kind={s.kind} />
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+        </div>
+        <span class="ct-sep" />
+        <button class="ct-btn" title="Thêm note từ vault" onClick={addNoteCard}>
           <IconNoteCard />
         </button>
-        <button title="Chèn ảnh (hoặc Ctrl+V dán ảnh)" onMouseDown={(e) => e.stopPropagation()} onClick={insertImage}>
+        <button class="ct-btn" title="Chèn ảnh (hoặc Ctrl+V để dán)" onClick={insertImage}>
           <IconImage />
         </button>
-        <span class="canvas-hint">
-          lăn chuột: pan (Shift = ngang) · Ctrl+lăn: zoom · Ctrl+V: dán ảnh · chọn edge rồi kéo 2 đầu để nối lại
-        </span>
+        <span class="ct-sep" />
+        <div class="ct-group">
+          <button
+            class="ct-btn"
+            classList={{ active: helpOpen() }}
+            title="Thao tác & phím tắt"
+            onClick={() => setHelpOpen(!helpOpen())}
+          >
+            <IconHelp />
+          </button>
+          <Show when={helpOpen()}>
+            <div class="ct-popover ct-help">
+              <div>
+                <b>Lăn chuột</b> pan · <b>Shift+lăn</b> pan ngang · <b>Ctrl+lăn</b> zoom
+              </div>
+              <div>
+                Chọn tool rồi <b>click</b> để đặt, <b>kéo</b> để vẽ kích thước
+              </div>
+              <div>
+                <b>Double-click nền</b> tạo card text · <b>Ctrl+V</b> dán ảnh
+              </div>
+              <div>Kéo từ chấm tròn mép card để nối · chọn edge rồi kéo 2 đầu để nối lại</div>
+              <div>Chọn node rồi kéo ô vuông ở 4 góc để đổi kích thước</div>
+              <div>
+                <b>Delete</b> xoá card/edge đang chọn · <b>Esc</b> huỷ tool
+              </div>
+              <div>
+                <b>Ctrl+Z</b> hoàn tác · <b>Ctrl+Shift+Z</b> làm lại
+              </div>
+            </div>
+          </Show>
+        </div>
       </div>
     </div>
   );
