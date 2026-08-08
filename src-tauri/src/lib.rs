@@ -126,6 +126,11 @@ fn vault_info(vault: &mut Vault, index_ms: u128) -> anyhow::Result<VaultInfo> {
 
 #[tauri::command]
 fn open_vault(path: String, app: AppHandle, state: State<AppState>) -> CmdResult<VaultInfo> {
+    // Không có guard này thì Db::open sẽ create_dir_all và âm thầm dựng lại một
+    // vault rỗng khi path đã biến mất (folder bị xoá, ổ rời rút ra, drive unmount).
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("Không tìm thấy thư mục vault: {path}"));
+    }
     let mut vault = Vault::open(&path).map_err(err)?;
     let stats = vault.index().map_err(err)?;
     let info = vault_info(&mut vault, stats.duration_ms).map_err(err)?;
@@ -701,6 +706,7 @@ fn resolve_link(target: String, state: State<AppState>) -> CmdResult<Option<Stri
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState::default())
         .manage(terminal::TermState::default())
         .invoke_handler(tauri::generate_handler![

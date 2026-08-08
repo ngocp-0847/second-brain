@@ -1185,6 +1185,112 @@ details[open] > .tree-dir::before {
   font-weight: 600;
 }
 
+/* ---- vault gần đây (empty-state + modal 🗂) ---- */
+.recent-title {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  align-self: flex-start;
+}
+
+.recent-vaults {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+  width: min(460px, 100%);
+}
+
+.recent-vault {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  padding: var(--sp-sm) var(--sp-md);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.recent-vault:hover {
+  background: var(--hover-soft);
+  border-color: var(--accent-border);
+}
+
+.recent-vault.active {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.recent-vault-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.recent-vault-name {
+  color: var(--fg-strong);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.recent-vault-path {
+  font-size: 11px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* path dài thì cắt đầu, giữ phần đuôi có tên folder */
+  text-align: left;
+}
+
+.recent-vault-forget {
+  background: transparent;
+  border: none;
+  color: var(--fg-faint);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.recent-vault:hover .recent-vault-forget {
+  opacity: 1;
+}
+
+.recent-vault-forget:hover {
+  background: var(--hover);
+  color: var(--danger);
+}
+
+.recent-empty {
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
+.vault-browse {
+  align-self: flex-start;
+  padding: var(--sp-sm) var(--sp-md);
+  background: transparent;
+  border: 1px dashed var(--border-card);
+  border-radius: var(--r-md);
+  color: var(--fg-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.vault-browse:hover {
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
+.empty-state .vault-browse {
+  align-self: center;
+}
+
 /* ---- settings & janitor ---- */
 .settings-modal,
 .janitor-modal {
