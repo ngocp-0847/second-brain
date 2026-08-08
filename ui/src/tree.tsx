@@ -80,9 +80,13 @@ interface DirProps {
   node: DirNode;
   current: string | null;
   editing: TreeEditing | null;
+  /** Đang lọc thì bung hết folder để thấy kết quả, bỏ qua closedDirs. */
+  filtering: boolean;
+  closedDirs: Set<string>;
   onOpen: (p: string) => void;
   onOpenNewTab?: (p: string) => void;
   onRename: (v: string) => void;
+  onToggleDir: (path: string, open: boolean) => void;
 }
 
 function Dir(props: DirProps) {
@@ -90,7 +94,14 @@ function Dir(props: DirProps) {
     <>
       <For each={props.node.dirs}>
         {(d) => (
-          <details open>
+          <details
+            open={props.filtering || !props.closedDirs.has(d.path)}
+            onToggle={(e) => {
+              // Lúc đang lọc, mọi folder bị ép mở — đừng ghi đè lựa chọn của user.
+              if (props.filtering) return;
+              props.onToggleDir(d.path, e.currentTarget.open);
+            }}
+          >
             <summary class="tree-dir">
               <Show
                 when={props.editing?.kind === "dir" && props.editing.path === d.path}
@@ -137,9 +148,11 @@ export function Tree(props: {
   filter: string;
   current: string | null;
   editing: TreeEditing | null;
+  closedDirs: Set<string>;
   onOpen: (p: string) => void;
   onOpenNewTab?: (p: string) => void;
   onRename: (v: string) => void;
+  onToggleDir: (path: string, open: boolean) => void;
 }) {
   const filtered = createMemo(() => {
     const q = props.filter.trim().toLowerCase();
@@ -162,9 +175,12 @@ export function Tree(props: {
         node={tree()}
         current={props.current}
         editing={props.editing}
+        filtering={!!props.filter.trim()}
+        closedDirs={props.closedDirs}
         onOpen={props.onOpen}
         onOpenNewTab={props.onOpenNewTab}
         onRename={props.onRename}
+        onToggleDir={props.onToggleDir}
       />
     </div>
   );

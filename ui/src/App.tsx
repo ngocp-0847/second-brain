@@ -26,6 +26,15 @@ import { createEditor, type EditorHandle, type SelectionInfo } from "./editor";
 import { GraphView } from "./graph";
 import { TermPanel } from "./terminal";
 import { Tree, type TreeEditing } from "./tree";
+import {
+  forgetVault,
+  getWorkspace,
+  initSession,
+  pushRecentVault,
+  recentVaults,
+  saveWorkspace,
+  type PersistedTab,
+} from "./session";
 
 type View = "editor" | "graph" | "canvas";
 
@@ -81,6 +90,12 @@ export default function App() {
   const [tabs, setTabs] = createSignal<TabState[]>([{ id: 1, kind: "empty", path: null }]);
   const [activeId, setActiveId] = createSignal(1);
   let nextTabId = 2;
+
+  // Folder bị thu gọn trong tree + modal chuyển vault (🗂).
+  const [closedDirs, setClosedDirs] = createSignal<Set<string>>(new Set());
+  const [vaultOpen, setVaultOpen] = createSignal(false);
+  // Chặn effect ghi workspace trong lúc đang khôi phục (tránh đè state vừa đọc lên).
+  const [restoring, setRestoring] = createSignal(false);
 
   // Settings + Janitor
   const [settingsOpen, setSettingsOpen] = createSignal(false);
@@ -172,19 +187,120 @@ export default function App() {
   };
 
   const openVaultAt = async (path: string) => {
+    setVaultOpen(false);
+    // Bật trước setRoot: nếu không, effect ghi workspace sẽ chạy ngay khi root()
+    // đổi — với tab của vault CŨ — và đè mất bản đã lưu của vault mới.
+    setRestoring(true);
     try {
-      applyInfo(await api.openVault(path));
-      localStorage.setItem("vaultPath", path);
+      const info = await api.openVault(path);
+      applyInfo(info);
+      await pushRecentVault(info.root);
       setCanvases(await api.listCanvases().catch(() => []));
+      // Mỗi vault nhớ bộ tab riêng; chưa có gì đã lưu thì về tab trống.
+      await restoreWorkspace(info.root);
       say(`Đã mở vault (${stats()!.notes} notes, index ${stats()!.index_ms}ms)`);
     } catch (e) {
+      // Vault đã biến mất (backend chặn ở open_vault) → giữ root() null, empty-state
+      // sẽ hiện danh sách recent để chọn cái khác. Không xoá khỏi recent: ổ rời
+      // cắm lại là dùng được.
       say(String(e));
+    } finally {
+      setRestoring(false);
     }
   };
 
   const pickVault = async () => {
     const dir = await openDialog({ directory: true, title: "Chọn thư mục vault" });
     if (typeof dir === "string") await openVaultAt(dir);
+  };
+
+  const toggleDir = (path: string, open: boolean) =>
+    setClosedDirs((prev) => {
+      if (open === !prev.has(path)) return prev; // không đổi → giữ nguyên tham chiếu
+      const next = new Set(prev);
+      if (open) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  /** Tên hiển thị của vault: đoạn cuối path. */
+  const vaultName = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
+
+  /** Danh sách vault gần đây — dùng chung cho empty-state và modal 🗂. */
+  const VaultList = () => (
+    <div class="recent-vaults">
+      <For each={recentVaults()}>
+        {(p) => (
+          <div
+            class="recent-vault"
+            classList={{ active: root() === p }}
+            title={p}
+            onClick={() => openVaultAt(p)}
+          >
+            <div class="recent-vault-text">
+              <div class="recent-vault-name">{vaultName(p)}</div>
+              <div class="recent-vault-path">{p}</div>
+            </div>
+            <button
+              class="recent-vault-forget"
+              title="Bỏ khỏi danh sách"
+              onClick={(e) => {
+                e.stopPropagation();
+                void forgetVault(p);
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </For>
+    </div>
+  );
+
+  /** Vault chưa có workspace đã lưu: một tab trống, bung lại toàn bộ folder. */
+  const resetWorkspace = () => {
+    const id = nextTabId++;
+    setTabs([{ id, kind: "empty", path: null }]);
+    setActiveId(id);
+    setClosedDirs(new Set<string>());
+    currentPath = null;
+    setCurrent(null);
+    setView("editor");
+    editor.setContent("");
+  };
+
+  /** Dựng lại tab + trạng thái tree đã lưu cho vault này.
+   *  Người gọi (openVaultAt) phải bật cờ restoring() TRƯỚC khi setRoot, nếu không
+   *  effect ghi workspace sẽ chạy với tab của vault cũ và đè mất bản đã lưu. */
+  const restoreWorkspace = async (vault: string) => {
+    const ws = getWorkspace(vault);
+    if (!ws?.tabs.length) {
+      resetWorkspace();
+      return;
+    }
+    {
+      // Note/canvas có thể đã bị xoá ngoài app từ lần trước → bỏ tab mồ côi.
+      const notePaths = new Set(notes().map((n) => n.path));
+      const canvasPaths = new Set(canvases());
+      const alive = ws.tabs.filter(
+        (t) =>
+          t.kind === "empty" ||
+          t.kind === "graph" ||
+          (t.kind === "note" && t.path && notePaths.has(t.path)) ||
+          (t.kind === "canvas" && t.path && canvasPaths.has(t.path)),
+      );
+      if (!alive.length) {
+        resetWorkspace();
+        return;
+      }
+      // id là số runtime, không lưu xuống đĩa — cấp lại từ đầu.
+      const restored: TabState[] = alive.map((t) => ({ id: nextTabId++, ...t }));
+      const idx = Math.min(Math.max(ws.activeIndex, 0), restored.length - 1);
+      setTabs(restored);
+      setActiveId(restored[idx].id);
+      setClosedDirs(new Set(ws.closedDirs ?? []));
+      await applyTab(restored[idx]);
+    }
   };
 
   const loadPanels = async (path: string) => {
@@ -852,8 +968,26 @@ export default function App() {
       },
     });
 
-    const saved = localStorage.getItem("vaultPath");
-    if (saved) openVaultAt(saved);
+    // Khôi phục phiên: đọc store rồi mở lại vault gần nhất (kèm tab + tree state).
+    // Tuần tự, không fire-and-forget: applyTab cần editor ở trên đã dựng xong.
+    void (async () => {
+      await initSession();
+      const last = recentVaults()[0];
+      if (last) await openVaultAt(last);
+    })();
+
+    // Ghi lại workspace mỗi khi tab hoặc trạng thái tree đổi. autoSave của plugin
+    // gộp các lần ghi liên tiếp nên chuyển tab nhanh không đập đĩa.
+    createEffect(() => {
+      const vault = root();
+      const ts = tabs();
+      const active = activeId();
+      const closed = closedDirs();
+      if (!vault || restoring()) return;
+      const persisted: PersistedTab[] = ts.map((t) => ({ kind: t.kind, path: t.path }));
+      const idx = Math.max(0, ts.findIndex((t) => t.id === active));
+      void saveWorkspace(vault, { tabs: persisted, activeIndex: idx, closedDirs: [...closed] });
+    });
 
     // Tiến độ & trạng thái embedding từ worker semantic.
     const unlistenProgress = listen<[number, number]>("semantic-progress", (e) => {
@@ -932,7 +1066,7 @@ export default function App() {
         <button title="Chat với agent (sửa nội dung, format, cấu trúc vault)" classList={{ active: chatOpen() }} onClick={toggleChat}>🤖</button>
         <button title="Terminal chạy claude (Ctrl+`)" classList={{ active: termVisible() }} onClick={() => setTermVisible((v) => !v)}>🖥</button>
         <div class="ribbon-spacer" />
-        <button title="Mở vault khác" onClick={pickVault}>🗂</button>
+        <button title="Vault: chuyển hoặc mở thư mục khác" onClick={() => setVaultOpen(true)}>🗂</button>
         <button title="Settings" onClick={openSettings}>⚙</button>
       </nav>
 
@@ -959,9 +1093,11 @@ export default function App() {
               filter={""}
               current={current()}
               editing={treeEditing()}
+              closedDirs={closedDirs()}
               onOpen={openNote}
               onOpenNewTab={openNoteInNewTab}
               onRename={finishTreeRename}
+              onToggleDir={toggleDir}
             />
             <Show when={canvases().length > 0}>
               <div class="panel-title">Canvas</div>
@@ -1038,8 +1174,17 @@ export default function App() {
             <p>
               {root()
                 ? "Chọn note bên trái, hoặc Ctrl+K để tìm / tạo."
-                : "Bấm 🗂 để mở một vault (thư mục chứa file .md)."}
+                : "Mở một vault (thư mục chứa file .md) để bắt đầu."}
             </p>
+            <Show when={!root()}>
+              <Show when={recentVaults().length > 0}>
+                <div class="recent-title">Vault gần đây</div>
+                <VaultList />
+              </Show>
+              <button class="vault-browse" onClick={pickVault}>
+                Chọn thư mục khác…
+              </button>
+            </Show>
             <p class="hint">
               Ctrl+K tìm/tạo · ? hỏi đáp · Ctrl+G graph · 📅 daily note · [[ autocomplete · Ctrl+Click mở link
             </p>
@@ -1288,6 +1433,25 @@ export default function App() {
                 </Show>
               </div>
             </Show>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={vaultOpen()}>
+        <div class="overlay" onClick={() => setVaultOpen(false)}>
+          <div class="prompt-modal settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div class="prompt-title">Vault</div>
+            <div class="settings-body">
+              <Show
+                when={recentVaults().length > 0}
+                fallback={<div class="recent-empty">Chưa mở vault nào.</div>}
+              >
+                <VaultList />
+              </Show>
+              <button class="vault-browse" onClick={pickVault}>
+                Chọn thư mục khác…
+              </button>
+            </div>
           </div>
         </div>
       </Show>
