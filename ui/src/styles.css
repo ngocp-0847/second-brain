@@ -823,14 +823,14 @@ details[open] > .tree-dir .tree-dir-arrow {
 }
 
 .canvas-shape-body .canvas-text,
-.canvas-shape-body .canvas-textarea {
+.canvas-shape-body .card-editor {
   width: 100%;
 }
 
-.canvas-shape-body .canvas-textarea {
+/* Trong shape thì căn giữa; riêng lúc gõ thì căn trái cho dễ đọc dòng dài. */
+.canvas-shape-body .card-editor {
   height: 100%;
-  resize: none;
-  text-align: center;
+  text-align: left;
 }
 
 /* Giấy nhớ: nền đặc, chữ đậm tối, bóng dày như Miro (đặt trên SVG để không đổ bóng cả toolbar) */
@@ -841,8 +841,7 @@ details[open] > .tree-dir .tree-dir-arrow {
 /* Mực trên giấy nhớ phải là token riêng, không mượn màu nền: nền giấy là pastel
    đặc ở cả hai theme, nên ở light theme mượn --bg-side sẽ thành chữ sáng trên
    giấy vàng — không đọc nổi. */
-.canvas-sticky .canvas-shape-body,
-.canvas-sticky .canvas-textarea {
+.canvas-sticky .canvas-shape-body {
   color: var(--on-sticky);
   font-weight: 600;
   font-size: 14px;
@@ -1085,8 +1084,9 @@ details[open] > .tree-dir .tree-dir-arrow {
   bottom: -8px;
 }
 
+/* pre-wrap nằm ở .md-p/.md-quote (từng block), không đặt ở đây — nếu không thì
+ * xuống dòng giữa các block markdown sẽ thành khoảng trắng thừa. */
 .canvas-text {
-  white-space: pre-wrap;
   line-height: 1.5;
 }
 
@@ -1114,15 +1114,178 @@ details[open] > .tree-dir .tree-dir-arrow {
   border-radius: var(--r-sm);
 }
 
-.canvas-textarea {
+/* ---- editor markdown trong card (CodeMirror) ---- */
+
+.card-editor {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
+  min-height: 0;
+}
+
+.card-editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.card-editor-host .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+
+/* Card đã có viền/nền riêng — bỏ khung focus của CM cho khỏi hai lớp viền. */
+.card-editor-host .cm-editor.cm-focused {
+  outline: none;
+}
+
+.card-editor-host .cm-content {
+  padding: 0;
+}
+
+.card-editor-host .cm-gutters {
+  display: none;
+}
+
+.card-format {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-bottom: var(--sp-xs);
+  margin-bottom: var(--sp-xs);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.card-format button {
+  display: flex;
+  padding: 3px;
   background: transparent;
   border: none;
-  outline: none;
-  color: var(--fg);
-  resize: vertical;
-  font: inherit;
+  border-radius: var(--r-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.card-format button:hover {
+  background: var(--hover);
+  color: var(--fg-strong);
+}
+
+.card-format button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.card-format-sep {
+  width: 1px;
+  height: 14px;
+  margin: 0 var(--sp-xs);
+  background: var(--border);
+}
+
+/* Giấy nhớ dùng mực tối cố định trên nền pastel → editor phải theo, nếu không
+ * chữ CM (màu --fg) sẽ chìm nghỉm trên nền vàng. */
+.canvas-sticky .card-editor,
+.canvas-sticky .card-editor-host .cm-content {
+  color: var(--on-sticky);
+}
+
+/* Nền giấy nhớ là pastel ở CẢ HAI theme nên --hover (trắng/đen theo theme) sai
+ * màu ở đây; pha thẳng từ --on-sticky để luôn ăn nhập với mực. */
+.canvas-sticky .card-format {
+  border-bottom-color: color-mix(in srgb, var(--on-sticky) 15%, transparent);
+}
+
+.canvas-sticky .card-format button {
+  color: var(--on-sticky);
+  opacity: 0.65;
+}
+
+.canvas-sticky .card-format button:hover {
+  background: color-mix(in srgb, var(--on-sticky) 8%, transparent);
+  opacity: 1;
+}
+
+/* ---- markdown chỉ đọc trong card ---- */
+
+.md {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+}
+
+.md-p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.md-h {
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--fg-strong);
+}
+
+.canvas-sticky .md-h {
+  color: var(--on-sticky);
+}
+
+.md-h1 {
+  font-size: 1.5em;
+}
+.md-h2 {
+  font-size: 1.3em;
+}
+.md-h3 {
+  font-size: 1.15em;
+}
+.md-h4,
+.md-h5,
+.md-h6 {
+  font-size: 1em;
+}
+
+.md-list {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.md-list li.done {
+  color: var(--fg-faint);
+  text-decoration: line-through;
+}
+
+.md-list input[type="checkbox"] {
+  margin-right: var(--sp-xs);
+  vertical-align: middle;
+}
+
+.md-quote {
+  margin: 0;
+  padding-left: var(--sp-sm);
+  border-left: 2px solid var(--border-card);
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+}
+
+.md-code,
+.md-fence {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.92em;
+  background: var(--hover);
+  border-radius: var(--r-sm);
+}
+
+.md-code {
+  padding: 1px 4px;
+}
+
+.md-fence {
+  margin: 0;
+  padding: var(--sp-sm);
+  overflow-x: auto;
+  white-space: pre;
 }
 
 .canvas-file-name {
