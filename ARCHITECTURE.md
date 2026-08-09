@@ -36,11 +36,9 @@
 | Việc | Crate |
 |---|---|
 | Parse Markdown + wikilink | `markdown-rs` hoặc `pulldown-cmark` + extension tự viết cho `[[...]]`, `^block`, callout |
-| Full-text search | SQLite FTS5 (BM25, đã dùng từ M0 — đủ nhanh, không thêm dep); nâng cấp `tantivy` khi cần fuzzy/typo-tolerance |
-| Vector search | `sqlite-vec` (nhúng trong SQLite, không cần vector DB riêng) |
+| Full-text search | SQLite FTS5 (BM25, tokenizer `unicode61`) — đủ nhanh, không thêm dep |
 | Metadata cache | `rusqlite` (SQLite, WAL mode) |
 | File watching | `notify` + debounce |
-| Embedding local | `fastembed-rs` (ONNX, `multilingual-e5-small` ~110MB — hỗ trợ tiếng Việt, 384-dim) |
 | LLM | Shell-out sang Claude Code CLI headless / Codex CLI (`tokio::process`) + HTTP client dự phòng |
 | Git snapshot | `gix` (gitoxide) |
 | Scheduler | `tokio` + `tokio-cron-scheduler` |
@@ -61,8 +59,8 @@ flowchart TB
     subgraph CORE["Rust Core (tokio)"]
         IPC[IPC layer - Tauri commands/events]
         VAULT[vault-core<br/>file watch, parse, link graph]
-        INDEX[indexer<br/>tantivy + sqlite-vec]
-        SEARCH[search<br/>hybrid BM25 + vector]
+        INDEX[indexer<br/>chunk + FTS5]
+        SEARCH[search<br/>BM25 + related notes]
         QA[qa engine<br/>RAG pipeline]
         JANITOR[janitor<br/>lint + restructure]
         SNAP[snapshotter - gix]
@@ -70,8 +68,7 @@ flowchart TB
 
     subgraph DISK["Đĩa"]
         MD[(Vault: *.md)]
-        DB[(.brain/cache.db<br/>SQLite + sqlite-vec)]
-        TANT[(.brain/fts/<br/>tantivy index)]
+        DB[(.brain/cache.db<br/>SQLite + FTS5)]
         GIT[(.brain/snapshots<br/>git repo ẩn)]
     end
 
@@ -80,8 +77,8 @@ flowchart TB
     IPC <--> VAULT & SEARCH & QA & JANITOR
     VAULT --> MD
     VAULT --> INDEX
-    INDEX --> DB & TANT
-    SEARCH --> DB & TANT
+    INDEX --> DB
+    SEARCH --> DB
     QA --> SEARCH
     JANITOR --> VAULT & SNAP
     SNAP --> GIT
@@ -93,9 +90,9 @@ flowchart TB
 second-brain/
 ├── crates/
 │   ├── vault-core/      # mô hình vault, watcher, parser, link graph
-│   ├── indexer/         # incremental indexing: tantivy + embeddings
-│   ├── search/          # hybrid search, query parser
-│   ├── qa/              # RAG: retrieve → rerank → generate + citations
+│   ├── indexer/         # incremental indexing: chunk + FTS5
+│   ├── search/          # BM25 search, query parser
+│   ├── qa/              # RAG: retrieve → generate + citations
 │   ├── janitor/         # rule engine lint + restructure planner/executor
 │   └── ipc-types/       # struct chia sẻ (serde) giữa core và UI
 ├── src-tauri/           # Tauri shell, wiring, scheduler
@@ -111,10 +108,9 @@ second-brain/
 ```
 my-vault/
 ├── .brain/              # mọi thứ app sinh ra, gitignore-able, xóa được
-│   ├── cache.db         # SQLite: notes, links, tags, embeddings, janitor log
-│   ├── fts/             # tantivy index
+│   ├── cache.db         # SQLite: notes, links, tags, chunk + FTS5, janitor log
 │   ├── snapshots/       # bare git repo cho janitor rollback
-│   └── config.toml      # cấu hình vault (rules janitor, model, lịch chạy)
+│   └── config.toml      # cấu hình vault (rules janitor, lịch chạy)
 ├── notes/...            # Markdown của người dùng, cấu trúc tự do
 └── attachments/
 ```
@@ -144,12 +140,12 @@ CREATE TABLE chunk (                -- đơn vị index cho search & RAG
   note_id INTEGER REFERENCES note(id),
   heading_path TEXT,                -- "Rust > Ownership > Borrowing"
   start_line INTEGER, end_line INTEGER,
-  text TEXT
+  text TEXT,
+  text_hash BLOB                    -- bỏ qua chunk không đổi khi re-index
 );
 
-CREATE VIRTUAL TABLE chunk_vec USING vec0(
-  chunk_id INTEGER PRIMARY KEY,
-  embedding FLOAT[384]              -- bge-small
+CREATE VIRTUAL TABLE chunk_fts USING fts5(
+  text, content='chunk', content_rowid='id', tokenize='unicode61'
 );
 
 CREATE TABLE janitor_run (...);     -- xem §8
@@ -166,11 +162,10 @@ parse (markdown AST + frontmatter + wikilinks)
      ▼
 transaction: cập nhật note/link/chunk
      ▼
-song song: tantivy re-index chunks ┐
-           re-embed chunks đổi     ┤──▶ emit event "note-updated" → UI
+trigger FTS5 tự re-index chunk đổi ──▶ emit event "note-updated" → UI
 ```
 
-- **Incremental theo chunk:** chỉ re-embed chunk có hash đổi → sửa 1 dòng trong note 5.000 từ chỉ tốn 1 lần embed.
+- **Incremental theo chunk:** chunk có `text_hash` không đổi thì không ghi lại → sửa 1 dòng trong note 5.000 từ chỉ đụng đúng 1 chunk.
 - Cold start: quét toàn vault song song bằng `rayon`; 10k note mục tiêu < 5s lần đầu, < 1s các lần sau (so hash).
 
 ---
@@ -180,25 +175,26 @@ song song: tantivy re-index chunks ┐
 Editor không chỉ là chỗ gõ chữ; nó là **client trực tiếp của search index**. Các tích hợp cụ thể:
 
 1. **Live preview kiểu Obsidian** — CodeMirror 6 decorations: cú pháp Markdown ẩn/hiện theo vị trí con trỏ, render inline (bold, link, callout, ảnh, LaTeX qua KaTeX).
-2. **`[[` autocomplete ngữ nghĩa** — gõ `[[` gợi ý note theo *fuzzy title + semantic similarity với câu đang viết* (gọi hybrid search với context là đoạn văn hiện tại), không chỉ match tên.
-3. **Backlink & unlinked mentions panel** — panel phải hiển thị cả backlink tường minh lẫn *unlinked mentions* (tên note xuất hiện dạng plain text, tìm bằng tantivy phrase query) với nút "link hóa" một chạm.
-4. **Related notes sidebar** — top-k chunk gần nhất theo vector với note đang mở, cập nhật khi lưu. Đây là "search chạy ngầm khi bạn viết".
+2. **`[[` autocomplete** — gõ `[[` gợi ý note theo fuzzy title.
+3. **Backlink & unlinked mentions panel** — panel phải hiển thị cả backlink tường minh lẫn *unlinked mentions* (tên note xuất hiện dạng plain text, tìm bằng FTS5 phrase query) với nút "link hóa" một chạm.
+4. **Related notes sidebar** — suy ra từ chính graph vault: tag chung, cùng link tới một note, cùng được một note nhắc tới, cộng thêm khớp từ khóa tiêu đề. Thuần SQL nên chạy trong vài ms mỗi lần lưu; note đã link trực tiếp bị loại vì đã nằm ở panel backlink.
 5. **Search-and-edit toàn vault** — kết quả search hiển thị dạng snippet *có thể sửa trực tiếp trong panel kết quả* (mỗi snippet là một CM6 editor mini bind vào đúng dòng của file), giống "search & replace có não".
 6. **Rename = refactor** — đổi tên/di chuyển note → core rewrite mọi wikilink trỏ tới (dùng `link.src_offset`), atomic trong 1 transaction + 1 snapshot.
 
 ---
 
-## 6. Search — Hybrid
+## 6. Search — từ khóa
 
 **Omnibar một ô duy nhất** (Ctrl+K) với 3 chế độ, phân biệt bằng cú pháp:
 
 | Input | Chế độ | Engine |
 |---|---|---|
-| `rust ownership` | Hybrid search | BM25 (FTS5) + vector (sqlite-vec), trộn bằng **RRF** (Reciprocal Rank Fusion) |
-| `path:daily/ tag:#work "exact phrase"` | Query có toán tử | tantivy query parser mở rộng: `tag:`, `path:`, `title:`, `before:/after:` (frontmatter date) |
+| `rust ownership` | Search từ khóa | BM25 (FTS5, tokenizer `unicode61`) |
+| `path:daily/ tag:#work "exact phrase"` | Query có toán tử | query parser mở rộng: `tag:`, `path:`, `title:`, `before:/after:` (frontmatter date) |
 | `? tại sao mình chọn tokio thay vì async-std` | **Hỏi đáp** (prefix `?`) | RAG pipeline (§7) |
 
-- Search-as-you-type: BM25 trả trước (<10ms), kết quả vector merge vào ngay khi xong (~50ms) — UI cập nhật 2 nhịp, không chờ nhau.
+- Search-as-you-type đồng bộ: BM25 trả về <10ms nên gõ tới đâu kết quả tới đó, không có nhịp thứ hai để chờ.
+- **Vì sao không semantic:** embedding local (ONNX ~110MB, ~300MB RAM) đánh đổi bằng CPU chạy nền đúng lúc đang gõ — trải nghiệm edit được ưu tiên hơn. Ngữ nghĩa vẫn còn ở tầng Q&A, nơi LLM mở rộng truy vấn (§7).
 - Mọi kết quả đều có preview snippet + highlight, Enter mở đúng dòng.
 
 ---
@@ -207,10 +203,9 @@ Editor không chỉ là chỗ gõ chữ; nó là **client trực tiếp của se
 
 ```mermaid
 flowchart LR
-    Q[Câu hỏi] --> RW[Query rewrite<br/>tách sub-queries]
-    RW --> R[Hybrid retrieve<br/>top 24 chunks]
-    R --> RR[Rerank<br/>cross-encoder ONNX → top 6]
-    RR --> P[Prompt: chunks kèm<br/>đường dẫn + heading]
+    Q[Câu hỏi] --> RW[Query expand qua LLM<br/>đồng nghĩa, Anh↔Việt]
+    RW --> R[BM25 trên câu gốc + biến thể<br/>trộn RRF → top 6]
+    R --> P[Prompt: chunks kèm<br/>đường dẫn + heading]
     P --> LLM[LLM]
     LLM --> A[Trả lời + citations dạng wikilink]
 ```
@@ -244,8 +239,8 @@ flowchart LR
 | Rule | Hành động mặc định |
 |---|---|
 | Broken wikilink | `propose`: sửa nếu tìm được đích fuzzy-match duy nhất, ngược lại đưa vào report |
-| Orphan note (không link vào/ra) | `suggest`: gợi ý note nên link tới (vector similarity) |
-| Duplicate/near-duplicate (cosine > 0.95 + MinHash) | `suggest`: merge |
+| Orphan note (không link vào/ra) | `suggest`: gợi ý note nên link tới (related notes §5.4) |
+| Duplicate/near-duplicate (MinHash trên nội dung) | `suggest`: merge |
 | Frontmatter thiếu/sai schema (định nghĩa trong `config.toml`) | `auto`: bổ sung field mặc định |
 | Naming convention (regex per-folder) | `propose`: rename |
 | Attachment mồ côi | `propose`: chuyển vào trash |
@@ -253,19 +248,18 @@ flowchart LR
 | Note quá lớn (> ngưỡng) | `suggest`: tách theo heading |
 | Empty note / stub > 30 ngày | `suggest`: xóa hoặc merge |
 
-**Tầng 2 — Semantic restructure (LLM, tùy chọn bật, chạy sau tầng 1):**
+**Tầng 2 — LLM (tùy chọn bật, chạy sau tầng 1):**
 
-- **Phân cụm chủ đề:** HDBSCAN trên embeddings → phát hiện cụm note lệch với cấu trúc folder hiện tại.
-- **Đề xuất cấu trúc folder:** LLM nhận (cây folder hiện tại + danh sách cụm + title các note lệch chỗ) → đề xuất kế hoạch di chuyển, **luôn ở mức `propose`**, kèm giải thích từng move.
-- **Sinh/ cập nhật MOC** (Map of Content): mỗi folder ≥ N note có `_index.md` tự sinh — danh sách note nhóm theo chủ đề, LLM viết mô tả 1 dòng. File đánh dấu `generated: true` trong frontmatter, phần người dùng viết tay nằm trên marker `<!-- brain:begin-generated -->` không bao giờ bị ghi đè.
-- **Guardrails:** tối đa X move/đêm (mặc định 20); độ sâu folder ≤ 4; không tạo folder mới có < 3 note; toàn bộ plan phải pass "dry-run link check" (sau khi apply giả lập, số broken link không tăng) trước khi execute.
+- **Sinh/ cập nhật MOC** (Map of Content): mỗi folder ≥ 5 note có `_index.md` tự sinh — danh sách note nhóm theo chủ đề, LLM viết mô tả 1 dòng. File đánh dấu `generated: true` trong frontmatter, phần người dùng viết tay nằm trên marker `<!-- brain:begin-generated -->` không bao giờ bị ghi đè.
+- **Guardrails:** tối đa 3 MOC mỗi lần chạy; MOC còn tươi (<7 ngày) thì bỏ qua; mọi đề xuất **luôn ở mức `propose`** — user duyệt trong report.
+- *Đề xuất di chuyển note giữa các folder từng nằm ở tầng này, dựa trên embedding; đã bỏ cùng với semantic search (§6).*
 
 ### 8.3 Vòng đời một đêm
 
 ```
 02:00 ──▶ snapshot (git commit)
       ──▶ tầng 1: lint pass → actions theo mức tự trị
-      ──▶ tầng 2 (nếu bật): cluster → LLM plan → validate guardrails → apply mức `propose`
+      ──▶ tầng 2 (nếu bật): LLM sinh MOC → validate guardrails → apply mức `propose`
       ──▶ re-index phần bị ảnh hưởng
       ──▶ ghi janitor_run + sinh "Morning Report"
 Sáng ──▶ user mở app: banner report — mỗi action có [Giữ] [Hoàn tác] [Luôn cho phép rule này]
@@ -285,10 +279,10 @@ Sáng ──▶ user mở app: banner report — mỗi action có [Giữ] [Hoàn
 | Chỉ số | Mục tiêu |
 |---|---|
 | Cold start (index sẵn) | < 1s |
-| Full re-index | < 30s (embed là nút cổ chai, batch ONNX) |
+| Full re-index | < 30s (parse + FTS5 là nút cổ chai) |
 | Keystroke → decoration | < 16ms |
 | BM25 search | < 10ms |
-| Hybrid search đầy đủ | < 80ms |
+| Related notes panel | < 20ms |
 | RAM idle | < 150MB |
 
 ---
@@ -299,13 +293,13 @@ Sáng ──▶ user mở app: banner report — mỗi action có [Giữ] [Hoàn
 |---|---|---|
 | **M0 — Core vault** (3–4 tuần) | vault-core: parser, watcher, SQLite cache, link graph, CLI `brain index/query` | Index vault Obsidian thật, query backlink đúng |
 | **M1 — App đọc/sửa** (4–6 tuần) | Tauri shell, CM6 live preview, file tree, wikilink autocomplete, rename-refactor | Dùng thay Obsidian cho việc đọc + sửa cơ bản |
-| **M2 — Search** (2–3 tuần) | tantivy + sqlite-vec + RRF, omnibar, backlinks/unlinked mentions, related notes | Search < 80ms, unlinked mention chính xác |
+| **M2 — Search** (2–3 tuần) | FTS5/BM25, omnibar, backlinks/unlinked mentions, related notes | Search < 10ms, unlinked mention chính xác |
 | **M3 — Q&A** (2–3 tuần) | RAG pipeline, citations, provider Claude + local | Trả lời có citation đúng, từ chối khi thiếu dữ liệu |
 | **M4 — Janitor tầng 1** (3 tuần) | Snapshot, rule engine deterministic, morning report, CLI headless | Chạy 7 đêm liên tục trên vault thật không mất dữ liệu |
-| **M5 — Janitor tầng 2** (3–4 tuần) | Clustering, LLM restructure plan, MOC generation, trust learning | Plan pass guardrails, user duyệt được từng action |
+| **M5 — Janitor tầng 2** (3–4 tuần) | MOC generation qua LLM, trust learning | Plan pass guardrails, user duyệt được từng action |
 | **M6 — Polish** | Graph view, themes, command palette, settings UI, installer | — |
 
 **Rủi ro chính & đối sách:**
 - *Editor live-preview khó nhất dự án* → dựa tối đa vào hệ sinh thái CM6 (tham khảo các plugin live-preview mã nguồn mở), làm sớm ở M1.
 - *Janitor phá vault* → git snapshot + trash + guardrails + autonomy levels (§8.1); M4 phải "đóng đinh" an toàn trước khi cho LLM đụng vào cấu trúc ở M5.
-- *Embedding chậm trên máy yếu* → model nhỏ (384-dim), batch, chỉ embed chunk đổi; cho phép tắt semantic → app vẫn chạy đầy đủ với BM25.
+- *Search kém "thông minh" khi không có semantic* → bù bằng reasoning search ở tầng Q&A (LLM mở rộng truy vấn, §7) và related notes suy từ graph (§5.4); đổi lại app không bao giờ tốn CPU/RAM nền trong lúc gõ.

@@ -19,11 +19,19 @@ export interface Workspace {
   closedDirs: string[];
 }
 
+export interface Bookmark {
+  /** Path .md trong vault. */
+  path: string;
+  /** Tên hiển thị, người dùng đặt lúc bookmark (mặc định = tên file). */
+  title: string;
+}
+
 const FILE = "settings.json";
 const RECENT_MAX = 8;
 
 let store: Store | null = null;
 let workspaces: Record<string, Workspace> = {};
+let bookmarks: Record<string, Bookmark[]> = {};
 
 // Signal để UI (danh sách recent ở empty-state và modal 🗂) tự cập nhật.
 const [recentVaults, setRecentVaults] = createSignal<string[]>([]);
@@ -37,6 +45,7 @@ export async function initSession(): Promise<void> {
     store = await load(FILE, { autoSave: 200 });
     const recent = (await store.get<string[]>("recentVaults")) ?? null;
     workspaces = (await store.get<Record<string, Workspace>>("workspaces")) ?? {};
+    bookmarks = (await store.get<Record<string, Bookmark[]>>("bookmarks")) ?? {};
 
     if (recent) {
       setRecentVaults(recent);
@@ -66,8 +75,10 @@ export async function pushRecentVault(path: string): Promise<void> {
 export async function forgetVault(path: string): Promise<void> {
   setRecentVaults((r) => r.filter((p) => p !== path));
   delete workspaces[path];
+  delete bookmarks[path];
   await store?.set("recentVaults", recentVaults()).catch(() => {});
   await store?.set("workspaces", workspaces).catch(() => {});
+  await store?.set("bookmarks", bookmarks).catch(() => {});
 }
 
 export function getWorkspace(vault: string): Workspace | null {
@@ -77,4 +88,13 @@ export function getWorkspace(vault: string): Workspace | null {
 export async function saveWorkspace(vault: string, ws: Workspace): Promise<void> {
   workspaces[vault] = ws;
   await store?.set("workspaces", workspaces).catch(() => {});
+}
+
+export function getBookmarks(vault: string): Bookmark[] {
+  return bookmarks[vault] ?? [];
+}
+
+export async function saveBookmarks(vault: string, list: Bookmark[]): Promise<void> {
+  bookmarks[vault] = list;
+  await store?.set("bookmarks", bookmarks).catch(() => {});
 }

@@ -27,8 +27,6 @@ pub enum Apply {
     FixLink { bad_target: String, new_target: String },
     /// Chuyển note vào .brain/trash.
     TrashNote { path: String },
-    /// Di chuyển note (tầng 2) — rename_note nên wikilink tự cập nhật.
-    MoveNote { from: String, to: String },
     /// Ghi/cập nhật MOC; phần user viết trên marker được giữ nguyên.
     WriteMoc { path: String, content: String },
     /// Chỉ thông tin, không có hành động.
@@ -137,7 +135,7 @@ fn lint(vault: &Vault, now: i64) -> Result<Vec<Finding>> {
     // Map stem (thường hóa) → path để fuzzy-fix link gãy.
     let mut stems: Vec<(String, String)> = notes
         .iter()
-        .map(|(p, _)| {
+        .map(|(p, _, _)| {
             let stem = Path::new(p)
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -351,10 +349,6 @@ fn execute(vault: &mut Vault, apply: &Apply) -> Result<String> {
             vault.trash_note(path)?;
             Ok("đã chuyển vào .brain/trash".into())
         }
-        Apply::MoveNote { from, to } => {
-            let n = vault.rename_note(from, to)?;
-            Ok(format!("đã di chuyển, cập nhật {n} link trỏ tới"))
-        }
         Apply::WriteMoc { path, content } => {
             let abs = vault.abs_path(path)?;
             // Giữ nguyên phần user viết tay phía trên marker.
@@ -377,13 +371,9 @@ fn execute(vault: &mut Vault, apply: &Apply) -> Result<String> {
     }
 }
 
-/// Tầng 2 (semantic): chạy SAU `run`, chèn proposals vào lần chạy gần nhất.
+/// Tầng 2 (LLM): chạy SAU `run`, chèn proposals vào lần chạy gần nhất.
 /// Mọi action đều ở mức propose — không tự thực thi.
-pub fn append_semantic(
-    vault: &mut Vault,
-    provider: qa::Provider,
-    sem: &semantic::SemanticIndex,
-) -> Result<Vec<ActionRow>> {
+pub fn append_tier2(vault: &mut Vault, provider: qa::Provider) -> Result<Vec<ActionRow>> {
     ensure_schema(vault)?;
     let run_id: i64 = vault
         .db
@@ -395,8 +385,7 @@ pub fn append_semantic(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let mut findings = restructure::propose_moves(vault, sem, provider, now).unwrap_or_default();
-    findings.extend(restructure::propose_mocs(vault, provider, now).unwrap_or_default());
+    let findings = restructure::propose_mocs(vault, provider, now).unwrap_or_default();
 
     let mut rows = Vec::new();
     for f in findings {

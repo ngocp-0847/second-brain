@@ -3,30 +3,54 @@
   margin: 0;
 }
 
-/* Design tokens — nguồn chân lý: DESIGN.md (format design.md của Google Labs) */
-:root {
+/* Design tokens — nguồn chân lý: DESIGN.md (format design.md của Google Labs)
+ *
+ * Theme: script inline trong index.html luôn đóng dấu data-theme="dark" hoặc
+ * "light" lên <html> TRƯỚC khi paint (đã quy đổi lựa chọn "system" qua
+ * matchMedia). CSS vì vậy không cần @media prefers-color-scheme — chỉ có hai
+ * trạng thái tường minh, dễ kiểm thử hơn ba.
+ *
+ * Mọi màu PHẢI đi qua token. Giá trị hex chỉ được xuất hiện trong hai khối
+ * dưới đây; đó là điều kiện để đổi theme không sót chỗ nào. */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  /* 4 tầng nền theo độ sâu: ngoài cùng tối nhất → nổi trên cùng sáng nhất */
   --bg: #16181f;
   --bg-ribbon: #14161d;
   --bg-side: #1b1e28;
   --bg-panel: #1e2130;
   --border: #2a2f42;
   --border-card: #3a415a;
+  /* 5 nấc chữ, không tự chế nấc thứ 6 */
   --fg-strong: #e8eaf2;
   --fg: #c7cddd;
   --fg-soft: #a9b1c5;
   --fg-muted: #8b93a7;
   --fg-faint: #67708a;
+  /* accent-strong = nấc tương phản cao hơn accent (dark: sáng hơn) */
   --accent: #a48fff;
   --accent-strong: #d4c9ff;
   --accent-bg: #a48fff26;
+  --accent-bg-hover: #a48fff3d;
   --accent-border: #a48fff55;
   --link: #8fa8ff;
   --success: #9ece8f;
   --warning: #e8c76a;
   --danger: #e0876a;
+  --code: #e0b06a;
   --hover: #ffffff14;
   --hover-soft: #ffffff0d;
   --overlay: #00000066;
+  --selection: #3b4261;
+  --line-active: #ffffff08;
+  --scrollbar: #2f3549;
+  --canvas-dot: #ffffff0d;
+  --group-bg: #ffffff06;
+  --edge: #4a5170;
+  /* Chữ trên giấy nhớ: nền giấy là pastel đặc ở CẢ HAI theme nên mực luôn tối */
+  --on-sticky: #1b1e28;
+  --shadow-sticky: 0 6px 14px #00000059;
   --shadow-modal: 0 18px 50px #00000080;
   --shadow-card: 0 4px 16px #00000040;
   --sp-xs: 4px;
@@ -36,6 +60,49 @@
   --r-sm: 6px;
   --r-md: 8px;
   --r-lg: 10px;
+}
+
+/* Light: đảo chiều tương phản, giữ nguyên ngữ nghĩa từng token.
+ * Thang nền vẫn "ngoài → trong = chìm → nổi", chỉ là chìm nghĩa là xám hơn
+ * chứ không phải tối hơn. Accent phải sẫm lại: tím #a48fff trên nền sáng chỉ
+ * đạt ~2.3:1, không đủ đọc. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f7f8fb;
+  --bg-ribbon: #e6e7ee;
+  --bg-side: #eef0f5;
+  --bg-panel: #fdfdff;
+  --border: #d9dce6;
+  --border-card: #c3c8d6;
+  --fg-strong: #1b1e28;
+  --fg: #383d4e;
+  --fg-soft: #4e5568;
+  --fg-muted: #6b7285;
+  --fg-faint: #8b93a7;
+  --accent: #7a5cf0;
+  --accent-strong: #5a35d6;
+  --accent-bg: #7a5cf01f;
+  --accent-bg-hover: #7a5cf033;
+  --accent-border: #7a5cf066;
+  --link: #3b5bdb;
+  --success: #3f8f4f;
+  --warning: #9a7212;
+  --danger: #c0492a;
+  --code: #a8600a;
+  /* Overlay hover đảo từ trắng sang đen, nếu không sẽ vô hình trên nền sáng */
+  --hover: #0000000f;
+  --hover-soft: #00000008;
+  --overlay: #1b1e2859;
+  --selection: #cdd7f5;
+  --line-active: #00000006;
+  --scrollbar: #c3c8d6;
+  --canvas-dot: #00000014;
+  --group-bg: #00000008;
+  --edge: #9aa3b8;
+  --on-sticky: #1b1e28;
+  --shadow-sticky: 0 6px 14px #1b1e2833;
+  --shadow-modal: 0 18px 50px #1b1e2833;
+  --shadow-card: 0 4px 16px #1b1e281f;
 }
 
 html,
@@ -89,9 +156,11 @@ body {
 }
 
 .ribbon button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: none;
-  font-size: 16px;
   width: 34px;
   height: 34px;
   border-radius: var(--r-md);
@@ -133,10 +202,11 @@ body {
 
 .sidebar-head button,
 .note-header button {
+  display: flex;
+  align-items: center;
   background: transparent;
   border: none;
   color: var(--fg);
-  font-size: 15px;
   padding: var(--sp-xs) var(--sp-sm);
   border-radius: var(--r-sm);
   cursor: pointer;
@@ -159,6 +229,9 @@ body {
 }
 
 .tree-dir {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-xs);
   cursor: pointer;
   padding: 3px var(--sp-sm);
   color: var(--fg);
@@ -171,13 +244,15 @@ body {
   display: none;
 }
 
-details > .tree-dir::before {
-  content: "▸ ";
+.tree-dir-arrow {
+  width: 14px;
+  height: 14px;
   color: var(--fg-faint);
+  transition: transform 0.12s;
 }
 
-details[open] > .tree-dir::before {
-  content: "▾ ";
+details[open] > .tree-dir .tree-dir-arrow {
+  transform: rotate(90deg);
 }
 
 .tree-indent {
@@ -292,10 +367,11 @@ details[open] > .tree-dir::before {
 }
 
 .tab-close {
+  display: flex;
+  align-items: center;
   background: transparent;
   border: none;
   color: var(--fg-faint);
-  font-size: 13px;
   line-height: 1;
   padding: 2px 5px;
   border-radius: var(--r-sm);
@@ -313,6 +389,8 @@ details[open] > .tree-dir::before {
 }
 
 .tab-add {
+  display: flex;
+  align-items: center;
   background: transparent;
   border: none;
   color: var(--fg-muted);
@@ -439,10 +517,6 @@ details[open] > .tree-dir::before {
   color: var(--danger);
 }
 
-.statusbar .sem-status {
-  color: var(--link);
-}
-
 .janitor-badge {
   color: var(--warning);
   cursor: pointer;
@@ -567,7 +641,7 @@ details[open] > .tree-dir::before {
 }
 
 .ask-save:hover {
-  background: #a48fff3d;
+  background: var(--accent-bg-hover);
 }
 
 /* ---- graph view ---- */
@@ -598,7 +672,7 @@ details[open] > .tree-dir::before {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle, #ffffff0d 1px, transparent 1px) 0 0 / 24px 24px,
+    radial-gradient(circle, var(--canvas-dot) 1px, transparent 1px) 0 0 / 24px 24px,
     var(--bg);
   cursor: grab;
 }
@@ -606,6 +680,21 @@ details[open] > .tree-dir::before {
 /* Đang chọn tool đặt node: con trỏ chữ thập trên toàn canvas (trừ toolbar) */
 .canvas-host.placing {
   cursor: crosshair;
+}
+
+/* Đang kéo note từ sidebar qua canvas: viền trong báo "thả được ở đây" */
+.canvas-host.dropping::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 2px dashed var(--accent-border);
+  background: var(--accent-bg);
+  z-index: 4;
+}
+
+.tree-file {
+  -webkit-user-drag: element;
 }
 
 .canvas-host.placing .canvas-toolbar {
@@ -746,18 +835,21 @@ details[open] > .tree-dir::before {
 
 /* Giấy nhớ: nền đặc, chữ đậm tối, bóng dày như Miro (đặt trên SVG để không đổ bóng cả toolbar) */
 .canvas-sticky .canvas-shape {
-  filter: drop-shadow(0 6px 14px #00000059);
+  filter: drop-shadow(var(--shadow-sticky));
 }
 
+/* Mực trên giấy nhớ phải là token riêng, không mượn màu nền: nền giấy là pastel
+   đặc ở cả hai theme, nên ở light theme mượn --bg-side sẽ thành chữ sáng trên
+   giấy vàng — không đọc nổi. */
 .canvas-sticky .canvas-shape-body,
 .canvas-sticky .canvas-textarea {
-  color: var(--bg-side);
+  color: var(--on-sticky);
   font-weight: 600;
   font-size: 14px;
 }
 
 .canvas-sticky .canvas-link {
-  color: var(--bg-ribbon);
+  color: var(--on-sticky);
   text-decoration: underline;
 }
 
@@ -841,7 +933,7 @@ details[open] > .tree-dir::before {
   position: absolute;
   border: 2px solid var(--border-card);
   border-radius: var(--r-lg);
-  background: #ffffff06;
+  background: var(--group-bg);
   cursor: move;
 }
 
@@ -1111,6 +1203,187 @@ details[open] > .tree-dir::before {
   height: 22px;
   background: var(--border);
   margin: 0 4px;
+}
+
+/* ---- hộp xác nhận hành động phá huỷ ---- */
+
+.confirm-modal {
+  margin-top: 18vh;
+  width: min(460px, 90vw);
+  height: fit-content;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+  overflow: hidden;
+}
+
+.confirm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-md) var(--sp-lg) 0;
+}
+
+.confirm-title {
+  color: var(--fg-strong);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.confirm-x {
+  display: flex;
+  padding: var(--sp-xs);
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+
+.confirm-x:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.confirm-x svg {
+  width: 18px;
+  height: 18px;
+}
+
+.confirm-body {
+  padding: var(--sp-md) var(--sp-lg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.confirm-body p {
+  margin: 0 0 var(--sp-sm);
+}
+
+.confirm-detail {
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.confirm-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-md);
+  padding: var(--sp-md) var(--sp-lg);
+  border-top: 1px solid var(--border);
+}
+
+.confirm-skip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  color: var(--fg-soft);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: var(--sp-sm);
+}
+
+.confirm-actions button {
+  padding: 7px 16px;
+  border-radius: var(--r-md);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Chữ dùng --bg-panel: nền panel luôn ngược sáng với --danger ở cả 2 theme
+ * (cam nhạt/nền tối, đỏ sẫm/nền sáng) nên tương phản đủ mà không cần hex mới. */
+.btn-danger {
+  background: var(--danger);
+  border: 1px solid var(--danger);
+  color: var(--bg-panel);
+}
+
+.btn-danger:hover {
+  filter: brightness(1.08);
+}
+
+.btn-plain {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+.btn-plain:hover {
+  background: var(--hover);
+}
+
+/* Section bookmark nằm trên tree — nằm ngoài .tree nên tự lo padding ngang. */
+.bookmarks {
+  padding: 0 var(--sp-xs);
+  margin-bottom: var(--sp-xs);
+  user-select: none;
+}
+
+/* ---- context menu chuột phải (menu.tsx) ---- */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 60; /* trên .overlay (50) để menu của bookmark trong modal vẫn thấy */
+  min-width: 210px;
+  padding: var(--sp-xs);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+  user-select: none;
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  padding: 6px var(--sp-sm);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ctx-item:hover,
+.ctx-item.open {
+  background: var(--hover);
+}
+
+.ctx-item.danger {
+  color: var(--danger);
+}
+
+.ctx-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--fg-faint);
+}
+
+.ctx-item.danger .ctx-icon {
+  color: var(--danger);
+}
+
+.ctx-label {
+  flex: 1;
+}
+
+.ctx-caret {
+  color: var(--fg-faint);
+  padding-left: var(--sp-sm);
+}
+
+.ctx-sep {
+  height: 1px;
+  margin: var(--sp-xs) 0;
+  background: var(--border);
 }
 
 .ct-group {
@@ -1699,7 +1972,7 @@ details[open] > .tree-dir::before {
 }
 
 .chat-send:not(:disabled):hover {
-  background: #a48fff3d;
+  background: var(--accent-bg-hover);
 }
 
 /* ---- terminal panel (đáy khu vực chính) ---- */
@@ -1709,7 +1982,7 @@ details[open] > .tree-dir::before {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
-  background: #14161d;
+  background: var(--bg-ribbon);
 }
 
 .term-head {
@@ -1949,10 +2222,132 @@ details[open] > .tree-dir::before {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2f3549;
+  background: var(--scrollbar);
   border-radius: var(--r-sm);
 }
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* ---- hệ icon (lucide) ----
+ * Lucide sinh svg kèm class "lucide" và attribute width/height=24. Rule CSS
+ * thắng presentation attribute nên chỉ cần đặt cỡ ở đây; stroke-width đã set
+ * một lần qua <LucideProvider> ở main.tsx.
+ * Cỡ mặc định 18px nằm giữa thang 18–22px của DESIGN.md; từng cụm điều khiển
+ * chỉnh riêng bên dưới. */
+.lucide {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.ribbon .lucide {
+  width: 20px;
+  height: 20px;
+}
+
+.sidebar-head .lucide,
+.note-header button .lucide {
+  width: 17px;
+  height: 17px;
+}
+
+.tab .lucide,
+.tab-close .lucide,
+.tab-add .lucide {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-head .lucide,
+.term-head .lucide,
+.sel-pop-head button .lucide,
+.chat-attach-head button .lucide,
+.recent-vault-forget .lucide {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-chip .lucide,
+.sel-chip .lucide,
+.settings-state .lucide,
+.jan-item .lucide,
+.canvas-file-name .lucide {
+  width: 14px;
+  height: 14px;
+}
+
+/* Icon đứng cạnh chữ: các container này vốn là inline → cho về flex để icon
+   canh giữa theo dòng thay vì tụt xuống baseline. */
+.chat-title,
+.term-title,
+.note-path,
+.jan-item,
+.canvas-file-name,
+.settings-state,
+.janitor-badge,
+.chat-chip,
+.sel-chip,
+.sel-fab,
+.sel-tochat,
+.sel-pop-head span,
+.chat-attach-head span,
+.ask-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.prompt-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+}
+
+/* ---- chọn theme trong Settings ---- */
+.settings-section {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-top: var(--sp-xs);
+}
+
+.theme-choices {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-sm);
+}
+
+.theme-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: var(--sp-md) var(--sp-sm);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  color: var(--fg-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.theme-choice:hover {
+  background: var(--hover-soft);
+}
+
+.theme-choice.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
+.theme-choice .lucide {
+  width: 20px;
+  height: 20px;
 }

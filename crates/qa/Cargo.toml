@@ -6,6 +6,5 @@ license.workspace = true
 
 [dependencies]
 vault-core = { path = "../vault-core" }
-semantic = { path = "../semantic" }
 anyhow.workspace = true
 wait-timeout = "0.2"

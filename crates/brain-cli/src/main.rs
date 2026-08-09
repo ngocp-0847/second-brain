@@ -18,18 +18,13 @@ struct Cli {
 enum Cmd {
     /// Index (tăng dần) toàn vault vào .brain/cache.db
     Index,
-    /// Search nội dung note (BM25; thêm --semantic để trộn vector nếu đã `brain embed`)
+    /// Search nội dung note (từ khóa, BM25)
     Search {
         query: Vec<String>,
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: usize,
-        /// Trộn thêm kết quả semantic (cần đã chạy `brain embed`)
-        #[arg(long)]
-        semantic: bool,
     },
-    /// Embed toàn bộ chunk vào vector index (lần đầu tải model ~110MB)
-    Embed,
-    /// Note liên quan theo ngữ nghĩa với NOTE
+    /// Note liên quan với NOTE (tag chung / đồng trích dẫn / trùng từ khóa)
     Related { note: String },
     /// Hỏi đáp trên vault (RAG qua Claude Code CLI / Codex CLI)
     Ask { question: Vec<String> },
@@ -38,9 +33,9 @@ enum Cmd {
         /// Áp dụng luôn mọi đề xuất (mặc định chỉ đề xuất, duyệt trong app)
         #[arg(long)]
         apply_proposals: bool,
-        /// Chạy thêm tầng 2: LLM đề xuất tái cấu trúc folder + sinh MOC (cần agent CLI + đã embed)
+        /// Chạy thêm tầng 2: LLM sinh MOC cho folder lớn (cần agent CLI)
         #[arg(long)]
-        semantic: bool,
+        tier2: bool,
     },
     /// Liệt kê note đang link tới NOTE (đường dẫn hoặc title)
     Backlinks { note: String },
@@ -72,20 +67,9 @@ fn main() -> Result<()> {
                 eprintln!("warning: SQLite FTS5 không khả dụng — search sẽ dùng LIKE (chậm hơn)");
             }
         }
-        Cmd::Search { query, limit, semantic: use_sem } => {
+        Cmd::Search { query, limit } => {
             let q = query.join(" ");
-            let hits = if use_sem {
-                let idx = semantic::SemanticIndex::open(&root.join(".brain").join("cache.db"))?;
-                let emb = semantic::Embedder::new()?;
-                let vec_hits = idx.search(&emb, &q, 30)?;
-                let fts = vault.db.search(&q, 30)?;
-                semantic::rrf_merge(fts, vec_hits, |ids| vault.db.hydrate_chunks(ids), limit)?
-                    .into_iter()
-                    .map(|(h, _)| h)
-                    .collect()
-            } else {
-                vault.db.search(&q, limit)?
-            };
+            let hits = vault.db.search(&q, limit)?;
             if hits.is_empty() {
                 println!("Không tìm thấy kết quả cho: {q}");
             }
@@ -99,44 +83,13 @@ fn main() -> Result<()> {
                 println!("    {}", h.snippet.replace('\n', " "));
             }
         }
-        Cmd::Embed => {
-            let mut idx = semantic::SemanticIndex::open(&root.join(".brain").join("cache.db"))?;
-            let pending = idx.pending()?;
-            if pending == 0 {
-                println!("Vector index đã đầy đủ 🎉");
-            } else {
-                println!("Cần embed {pending} chunks — đang nạp model…");
-                let emb = semantic::Embedder::new()?;
-                idx.sync(&emb, |done, total| {
-                    print!("\r  {done}/{total}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                })?;
-                println!("\nXong.");
-            }
-        }
         Cmd::Related { note } => {
-            let id = vault
-                .db
-                .note_id(&note.replace('\\', "/"))?
-                .ok_or_else(|| anyhow::anyhow!("không tìm thấy note: {note}"))?;
-            let idx = semantic::SemanticIndex::open(&root.join(".brain").join("cache.db"))?;
-            let vec_hits = idx.related(id, 24)?;
-            let hits = vault.db.hydrate_chunks(&vec_hits.iter().map(|(i, _)| *i).collect::<Vec<_>>())?;
-            let mut seen = std::collections::HashSet::new();
-            let mut shown = 0;
-            for h in hits {
-                if h.path == note || !seen.insert(h.path.clone()) {
-                    continue;
-                }
-                println!("{}  \"{}\"", h.path, h.title);
-                shown += 1;
-                if shown >= 8 {
-                    break;
-                }
+            let rows = vault.db.related_notes(&note.replace('\\', "/"), 8)?;
+            for r in &rows {
+                println!("{}  \"{}\"  [{}]", r.path, r.title, r.reason);
             }
-            if shown == 0 {
-                println!("Chưa có dữ liệu vector — chạy `brain embed` trước.");
+            if rows.is_empty() {
+                println!("Không tìm thấy note liên quan nào với: {note}");
             }
         }
         Cmd::Backlinks { note } => {
@@ -176,19 +129,8 @@ fn main() -> Result<()> {
         }
         Cmd::Ask { question } => {
             let q = question.join(" ");
-            // Vector hits nếu đã embed; không thì reasoning search vẫn hoạt động.
-            let vec_hits = (|| -> anyhow::Result<Vec<(i64, f64)>> {
-                let idx = semantic::SemanticIndex::open(&root.join(".brain").join("cache.db"))?;
-                if idx.vector_count()? == 0 {
-                    return Ok(Vec::new());
-                }
-                let emb = semantic::Embedder::new()?;
-                idx.search(&emb, &q, 16)
-            })()
-            .unwrap_or_default();
-
-            eprintln!("Đang hỏi ({} chunk vector)…", vec_hits.len());
-            let ans = qa::ask(&vault.db, &q, vec_hits)?;
+            eprintln!("Đang hỏi…");
+            let ans = qa::ask(&vault.db, &q)?;
             println!("{}", ans.text);
             println!("\n— via {} · nguồn:", ans.provider);
             let mut seen = std::collections::HashSet::new();
@@ -198,25 +140,18 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Janitor { apply_proposals, semantic: run_semantic } => {
+        Cmd::Janitor { apply_proposals, tier2 } => {
             let mut report = janitor::run(&mut vault)?;
             println!(
                 "Janitor run #{} — snapshot: {}",
                 report.run_id,
                 if report.snapshotted { "✓ (git)" } else { "✗ (không có git!)" }
             );
-            if run_semantic {
+            if tier2 {
                 match qa::detect_provider() {
                     Some(provider) => {
-                        let idx =
-                            semantic::SemanticIndex::open(&root.join(".brain").join("cache.db"))?;
-                        if idx.vector_count()? == 0 {
-                            eprintln!("(tầng 2 bỏ qua: chưa embed — chạy `brain embed` trước)");
-                        } else {
-                            eprintln!("Tầng 2: đang hỏi {}…", provider.name());
-                            let rows = janitor::append_semantic(&mut vault, provider, &idx)?;
-                            report.proposals.extend(rows);
-                        }
+                        eprintln!("Tầng 2: đang hỏi {}…", provider.name());
+                        report.proposals.extend(janitor::append_tier2(&mut vault, provider)?);
                     }
                     None => eprintln!("(tầng 2 bỏ qua: không có agent CLI trên PATH)"),
                 }

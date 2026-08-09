@@ -13,7 +13,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 vault-core = { path = "../crates/vault-core" }
-semantic = { path = "../crates/semantic" }
 qa = { path = "../crates/qa" }
 janitor = { path = "../crates/janitor" }
 tauri = { version = "2", features = [] }

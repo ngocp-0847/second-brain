@@ -2,6 +2,7 @@
 // Kéo node để dịch, kéo nền để pan, lăn chuột để zoom, click node để mở note.
 import { onCleanup, onMount } from "solid-js";
 import { api } from "./api";
+import { cssVar } from "./theme";
 
 interface SimNode {
   path: string;
@@ -17,15 +18,33 @@ export function GraphView(props: { onOpen: (path: string) => void }) {
   let canvasEl!: HTMLCanvasElement;
   let raf = 0;
 
+  // onCleanup PHẢI đăng ký đồng bộ. Đặt nó sau `await` bên trong onMount(async…)
+  // thì Solid đã mất Owner và callback bị bỏ qua trong im lặng — listener trên
+  // window cùng vòng lặp requestAnimationFrame sẽ sống mãi sau khi rời view.
+  // Gọi thẳng trong thân component là chỗ chắc chắn còn Owner.
+  let dispose: (() => void) | null = null;
+  let disposed = false;
+  onCleanup(() => {
+    disposed = true;
+    dispose?.();
+  });
+
   onMount(async () => {
     const data = await api.graphData().catch(() => ({ nodes: [], edges: [] }));
+    if (disposed) return; // rời view trước khi tải xong
     const ctx = canvasEl.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1;
 
     const nodes: SimNode[] = data.nodes.map((n, i) => {
       const angle = (i / Math.max(1, data.nodes.length)) * Math.PI * 2;
       const r = 120 + Math.random() * 240;
-      return { ...n, x: Math.cos(angle) * r, y: Math.sin(angle) * r, vx: 0, vy: 0 };
+      return {
+        ...n,
+        x: Math.cos(angle) * r,
+        y: Math.sin(angle) * r,
+        vx: 0,
+        vy: 0,
+      };
     });
     const byPath = new Map(nodes.map((n) => [n.path, n]));
     const edges = data.edges
@@ -120,7 +139,15 @@ export function GraphView(props: { onOpen: (path: string) => void }) {
     };
 
     // ---- render ----
+    // Canvas 2D không hiểu var(), phải đọc giá trị thật. Đọc mỗi frame trong
+    // rAF loop nên đổi theme là frame kế tiếp đã đúng màu, không cần signal.
     const draw = () => {
+      const cEdge = cssVar("--edge");
+      const cAccent = cssVar("--accent");
+      const cAccentStrong = cssVar("--accent-strong");
+      const cNode = cssVar("--fg-muted");
+      const cLabelLit = cssVar("--fg-strong");
+      const cLabel = cssVar("--fg-muted");
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
       const w = canvasEl.width / dpr;
@@ -139,21 +166,23 @@ export function GraphView(props: { onOpen: (path: string) => void }) {
       ctx.lineWidth = 1 / scale;
       for (const { a, b } of edges) {
         const lit = hover && (a === hover || b === hover);
-        ctx.strokeStyle = lit ? "#a48fffaa" : "#3a415a66";
+        ctx.strokeStyle = lit ? cAccent : cEdge;
+        ctx.globalAlpha = lit ? 0.67 : 0.4;
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
       }
+      ctx.globalAlpha = 1;
       for (const n of nodes) {
         const r = 5 + Math.min(10, n.degree * 1.5);
         const lit = n === hover || neighbors.has(n);
-        ctx.fillStyle = n === hover ? "#c9b8ff" : lit ? "#a48fff" : "#8b93a7";
+        ctx.fillStyle = n === hover ? cAccentStrong : lit ? cAccent : cNode;
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         ctx.fill();
         if (scale > 0.55 || n.degree >= 3 || lit) {
-          ctx.fillStyle = lit ? "#e8eaf2" : "#9aa3b8";
+          ctx.fillStyle = lit ? cLabelLit : cLabel;
           ctx.font = `${12 / scale}px 'Segoe UI', sans-serif`;
           ctx.textAlign = "center";
           ctx.fillText(n.title, n.x, n.y + r + 14 / scale);
@@ -216,14 +245,14 @@ export function GraphView(props: { onOpen: (path: string) => void }) {
     window.addEventListener("mouseup", onUp);
     canvasEl.addEventListener("wheel", onWheel, { passive: false });
 
-    onCleanup(() => {
+    dispose = () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
       canvasEl.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       canvasEl.removeEventListener("wheel", onWheel);
-    });
+    };
   });
 
   return (

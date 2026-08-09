@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
   onCleanup,
@@ -24,28 +25,100 @@ import { CanvasView } from "./canvas";
 import { ChatPanel, type ChatSelection } from "./chat";
 import { createEditor, type EditorHandle, type SelectionInfo } from "./editor";
 import { GraphView } from "./graph";
+import {
+  IconAdd,
+  IconAgent,
+  IconAi,
+  IconAllClear,
+  IconAsk,
+  IconBookmark,
+  IconBullets,
+  IconCanvas,
+  IconClose,
+  IconCopyPath,
+  IconDaily,
+  IconDark,
+  IconDirArrow,
+  IconDuplicate,
+  IconGraph,
+  IconHistory,
+  IconJanitor,
+  IconLight,
+  IconMove,
+  IconNewFolder,
+  IconNewNote,
+  IconNewWindow,
+  IconOk,
+  IconOpenExternal,
+  IconOpenNewTab,
+  IconPanelClose,
+  IconPanelOpen,
+  IconReindex,
+  IconRename,
+  IconRestore,
+  IconReveal,
+  IconSearch,
+  IconSend,
+  IconSettings,
+  IconShorten,
+  IconSpell,
+  IconSync,
+  IconSystemTheme,
+  IconTable,
+  IconTerminal,
+  IconTranslate,
+  IconTrash,
+  IconUnbookmark,
+  IconVault,
+} from "./icons";
+import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { TermPanel } from "./terminal";
 import { Tree, type TreeEditing } from "./tree";
 import {
   forgetVault,
+  getBookmarks,
   getWorkspace,
   initSession,
   pushRecentVault,
   recentVaults,
+  saveBookmarks,
   saveWorkspace,
+  type Bookmark,
   type PersistedTab,
 } from "./session";
+import { isDark, setThemePref, theme, themePref, toggleTheme, type ThemePref } from "./theme";
 
 type View = "editor" | "graph" | "canvas";
 
+/** `?note=` do `open_note_window` gắn vào URL: cửa sổ này chỉ để xem đúng một
+ *  note, nên bỏ qua khôi phục phiên VÀ không được ghi đè workspace đã lưu. */
+const SOLO_NOTE = new URLSearchParams(location.search).get("note");
+
 /** Prompt sẵn cho "Sửa vùng chọn bằng AI" — bấm là chạy luôn. */
 const SELECTION_ACTIONS = [
-  { label: "📊 Bảng markdown", prompt: "Format đoạn này thành table markdown" },
-  { label: "✂ Viết gọn lại", prompt: "Viết lại đoạn này cho gọn và rõ hơn, giữ đủ ý" },
-  { label: "• Bullet list", prompt: "Chuyển đoạn này thành danh sách gạch đầu dòng" },
-  { label: "✓ Sửa chính tả", prompt: "Sửa chính tả và ngữ pháp, giữ nguyên cách diễn đạt" },
-  { label: "🇬🇧 Dịch EN", prompt: "Dịch đoạn này sang tiếng Anh tự nhiên" },
+  { icon: IconTable, label: "Bảng markdown", prompt: "Format đoạn này thành table markdown" },
+  { icon: IconShorten, label: "Viết gọn lại", prompt: "Viết lại đoạn này cho gọn và rõ hơn, giữ đủ ý" },
+  { icon: IconBullets, label: "Bullet list", prompt: "Chuyển đoạn này thành danh sách gạch đầu dòng" },
+  { icon: IconSpell, label: "Sửa chính tả", prompt: "Sửa chính tả và ngữ pháp, giữ nguyên cách diễn đạt" },
+  { icon: IconTranslate, label: "Dịch EN", prompt: "Dịch đoạn này sang tiếng Anh tự nhiên" },
 ];
+
+/** "3 phút trước", "2 ngày trước"… từ mtime (epoch giây). */
+const fmtAgo = (epochSec: number) => {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - epochSec);
+  if (s < 60) return "vừa xong";
+  const units: [number, string][] = [
+    [60, "phút"],
+    [3600, "giờ"],
+    [86400, "ngày"],
+    [86400 * 30, "tháng"],
+  ];
+  let out = "vừa xong";
+  for (const [size, name] of units) {
+    if (s >= size) out = `${Math.floor(s / size)} ${name} trước`;
+  }
+  return out;
+};
 
 /** Một tab của khu vực chính: note, graph, canvas hoặc trống ("New tab"). */
 interface TabState {
@@ -67,7 +140,6 @@ export default function App() {
   const [related, setRelated] = createSignal<RelatedNote[]>([]);
   const [mentions, setMentions] = createSignal<SearchHit[]>([]);
   const [status, setStatus] = createSignal("");
-  const [semStatus, setSemStatus] = createSignal("");
 
   // Omnibar (Ctrl+K)
   const [omniOpen, setOmniOpen] = createSignal(false);
@@ -107,6 +179,8 @@ export default function App() {
 
   // Revision history (🕘) của note đang mở
   const [historyOpen, setHistoryOpen] = createSignal(false);
+  /** Note mà modal 🕘 đang xem — có thể khác note đang mở (mở từ menu chuột phải). */
+  const [histPath, setHistPath] = createSignal<string | null>(null);
   const [revs, setRevs] = createSignal<RevisionMeta[]>([]);
   const [revSel, setRevSel] = createSignal<number | null>(null);
   const [revContent, setRevContent] = createSignal("");
@@ -125,6 +199,32 @@ export default function App() {
   const [aiError, setAiError] = createSignal("");
   const [chatSel, setChatSel] = createSignal<ChatSelection | null>(null);
   let aiInput: HTMLInputElement | undefined;
+
+  // Picker chọn note để gắn vào canvas: rỗng thì liệt kê note sửa gần đây, gõ thì lọc.
+  // Hộp xác nhận hành động phá huỷ (xóa note/folder).
+  const [confirmCfg, setConfirmCfg] = createSignal<{
+    title: string;
+    message: string;
+    detail: string;
+    confirmLabel: string;
+    onOk: () => void;
+  } | null>(null);
+  const [dontAsk, setDontAsk] = createSignal(false);
+
+  // Menu chuột phải + bookmark + hộp chọn folder khi "Di chuyển tới…"
+  const [ctxMenu, setCtxMenu] = createSignal<MenuAnchor | null>(null);
+  const [bookmarks, setBookmarks] = createSignal<Bookmark[]>([]);
+  const [bmOpen, setBmOpen] = createSignal(true);
+  const [folderPick, setFolderPick] = createSignal<{
+    title: string;
+    onOk: (dir: string) => void;
+  } | null>(null);
+  const [folderQuery, setFolderQuery] = createSignal("");
+
+  const [notePick, setNotePick] = createSignal<((path: string) => void) | null>(null);
+  const [pickQuery, setPickQuery] = createSignal("");
+  const [pickSel, setPickSel] = createSignal(0);
+  let pickInput: HTMLInputElement | undefined;
 
   // Modal nhập text (thay window.prompt vốn không chạy trong WebView)
   const [promptCfg, setPromptCfg] = createSignal<{
@@ -179,10 +279,26 @@ export default function App() {
     setTimeout(() => setStatus((s) => (s === msg ? "" : s)), 4000);
   };
 
-  const applyInfo = (info: { root: string; notes: NoteMeta[]; dirs: string[]; stats: Stats }) => {
+  // Chữ ký "những gì cây thư mục quan tâm". mtime đổi mỗi lần autosave nhưng
+  // không ảnh hưởng cây, nên so bằng chữ ký này để khỏi dựng lại toàn bộ tree
+  // (và mọi memo phụ thuộc) sau từng nhịp gõ.
+  const treeSig = (ns: NoteMeta[], ds: string[]) =>
+    `${ds.join(" ")}${ns.map((n) => `${n.path} ${n.title}`).join("")}`;
+  let lastTreeSig = "";
+
+  const applyInfo = (
+    info: { root: string; notes: NoteMeta[]; dirs: string[]; stats: Stats },
+    /** Bỏ qua guard chữ ký để lấy mtime mới nhất (dùng khi mở note picker). */
+    force = false,
+  ) => {
     setRoot(info.root);
-    setNotes(info.notes);
-    setDirs(info.dirs ?? []);
+    const nextDirs = info.dirs ?? [];
+    const sig = treeSig(info.notes, nextDirs);
+    if (force || sig !== lastTreeSig) {
+      lastTreeSig = sig;
+      setNotes(info.notes);
+      setDirs(nextDirs);
+    }
     setStats(info.stats);
   };
 
@@ -195,9 +311,16 @@ export default function App() {
       const info = await api.openVault(path);
       applyInfo(info);
       await pushRecentVault(info.root);
+      setBookmarks(getBookmarks(info.root));
       setCanvases(await api.listCanvases().catch(() => []));
-      // Mỗi vault nhớ bộ tab riêng; chưa có gì đã lưu thì về tab trống.
-      await restoreWorkspace(info.root);
+      if (SOLO_NOTE) {
+        // Cửa sổ rời: chỉ mở đúng file được yêu cầu, không đụng tới bộ tab
+        // đã lưu của cửa sổ chính.
+        await openByPath(SOLO_NOTE);
+      } else {
+        // Mỗi vault nhớ bộ tab riêng; chưa có gì đã lưu thì về tab trống.
+        await restoreWorkspace(info.root);
+      }
       say(`Đã mở vault (${stats()!.notes} notes, index ${stats()!.index_ms}ms)`);
     } catch (e) {
       // Vault đã biến mất (backend chặn ở open_vault) → giữ root() null, empty-state
@@ -249,7 +372,7 @@ export default function App() {
                 void forgetVault(p);
               }}
             >
-              ×
+              <IconClose />
             </button>
           </div>
         )}
@@ -304,9 +427,19 @@ export default function App() {
   };
 
   const loadPanels = async (path: string) => {
+    if (panelTimer) clearTimeout(panelTimer); // huỷ lượt debounce đang chờ
     setBacklinks(await api.backlinks(path).catch(() => []));
     setMentions(await api.unlinkedMentions(path).catch(() => []));
     setRelated(await api.relatedNotes(path).catch(() => []));
+  };
+
+  /** Nạp panel phải sau khi ngừng gõ — cả 3 query đều thuần SQL nên rẻ. */
+  let panelTimer: ReturnType<typeof setTimeout> | undefined;
+  const schedulePanels = (path: string) => {
+    if (panelTimer) clearTimeout(panelTimer);
+    panelTimer = setTimeout(() => {
+      if (currentPath === path) void loadPanels(path);
+    }, 300);
   };
 
   const activeTab = () => tabs().find((t) => t.id === activeId()) ?? tabs()[0];
@@ -432,12 +565,19 @@ export default function App() {
 
   const tabTitle = (t: TabState) =>
     t.kind === "graph"
-      ? "🕸 Graph"
+      ? "Graph"
       : t.kind === "canvas"
-        ? `🧩 ${(t.path ?? "").replace(/\.canvas$/i, "")}`
+        ? (t.path ?? "").replace(/\.canvas$/i, "")
         : t.path
           ? t.path.split("/").pop()!.replace(/\.md$/i, "")
           : "New tab";
+
+  /** Icon đứng trước nhãn tab, phân biệt loại view. */
+  const TabIcon = (p: { kind: TabState["kind"] }) => (
+    <Show when={p.kind === "graph"} fallback={<Show when={p.kind === "canvas"}><IconCanvas /></Show>}>
+      <IconGraph />
+    </Show>
+  );
 
   /** Note đổi path (rename) hoặc biến mất (to=null) → cập nhật mọi tab đang trỏ tới. */
   const retargetTabs = (from: string, to: string | null) =>
@@ -465,22 +605,51 @@ export default function App() {
     }
   };
 
-  const newCanvas = () =>
-    setPromptCfg({
-      title: "Tên canvas mới",
-      value: "",
-      onOk: async (name) => {
-        if (!name.trim()) return;
-        const path = `${name.trim().replace(/\.canvas$/i, "")}.canvas`;
-        try {
-          await api.writeNote(path, JSON.stringify({ nodes: [], edges: [] }));
-          setCanvases(await api.listCanvases().catch(() => []));
-          openCanvas(path);
-        } catch (e) {
-          say(String(e));
-        }
-      },
-    });
+  /** Tạo canvas rỗng "Untitled" rồi mở luôn, không hỏi tên — giống Obsidian.
+   *  Đổi tên sau bằng nút đổi tên, đỡ chặn luồng khi đang cần vẽ nhanh. */
+  const newCanvas = async () => {
+    const taken = new Set(
+      canvases()
+        .filter((c) => !c.includes("/"))
+        .map((c) => c.toLowerCase().replace(/\.canvas$/i, "")),
+    );
+    const path = `${untitledName(taken)}.canvas`;
+    try {
+      await api.writeNote(path, JSON.stringify({ nodes: [], edges: [] }));
+      setCanvases(await api.listCanvases().catch(() => []));
+      openCanvas(path);
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  const openNotePicker = (cb: (path: string) => void) => {
+    setPickQuery("");
+    setPickSel(0);
+    setNotePick(() => cb); // bọc trong hàm: setSignal coi callback là updater
+    queueMicrotask(() => pickInput?.focus());
+    // applyInfo bỏ qua thay đổi chỉ-mtime để khỏi dựng lại tree khi gõ, nên ở
+    // đây phải ép nạp lại thì thứ tự "sửa gần đây" mới đúng.
+    void api.refresh().then((i) => applyInfo(i, true)).catch(() => {});
+  };
+
+  /** Rỗng → note sửa gần đây; có query → lọc theo tên và đường dẫn. */
+  const pickHits = createMemo(() => {
+    const q = pickQuery().trim().toLowerCase();
+    const all = notes();
+    if (!q) return [...all].sort((a, b) => b.mtime - a.mtime).slice(0, 40);
+    return all
+      .filter((n) => n.path.toLowerCase().includes(q) || n.title.toLowerCase().includes(q))
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 40);
+  });
+
+  const confirmPick = () => {
+    const hit = pickHits()[pickSel()];
+    const cb = notePick();
+    if (hit && cb) cb(hit.path);
+    setNotePick(null);
+  };
 
   const openByTarget = async (target: string) => {
     const path = await api.resolveLink(target);
@@ -500,12 +669,12 @@ export default function App() {
   const saveCurrent = async (content: string) => {
     if (!currentPath) return;
     try {
-      await api.writeNote(currentPath, content);
+      // write_note đã index và trả VaultInfo — trước đây còn gọi thêm refresh(),
+      // tức là quét toàn vault hai lần cho mỗi lần autosave.
+      applyInfo(await api.writeNoteWithInfo(currentPath, content));
       setStatus("Đã lưu ✓");
       setTimeout(() => setStatus((s) => (s === "Đã lưu ✓" ? "" : s)), 1500);
-      loadPanels(currentPath);
-      const info = await api.refresh();
-      applyInfo(info);
+      schedulePanels(currentPath);
       // H1 vừa bị sửa trong lần lưu này → đồng bộ tên file theo H1.
       const h1 = extractH1(content);
       if (h1 !== lastH1) {
@@ -524,16 +693,25 @@ export default function App() {
     return name;
   };
 
+  /** Con trực tiếp của `dir` ("" = gốc vault) trong một danh sách path phẳng. */
+  const childrenOf = (paths: string[], dir: string) => {
+    const prefix = dir ? `${dir}/` : "";
+    return paths
+      .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes("/"))
+      .map((p) => p.slice(prefix.length));
+  };
+
   /** Tạo note ngay với tên Untitled rồi cho đặt tên inline trong tree — không popup. */
-  const newNote = async () => {
+  const newNoteIn = async (dir = "") => {
     if (treeEditing()) return;
     const taken = new Set(
-      notes()
-        .filter((n) => !n.path.includes("/"))
-        .map((n) => n.path.toLowerCase().replace(/\.md$/i, "")),
+      childrenOf(notes().map((n) => n.path), dir).map((n) =>
+        n.toLowerCase().replace(/\.md$/i, ""),
+      ),
     );
+    const at = dir ? `${dir}/${untitledName(taken)}` : untitledName(taken);
     try {
-      const rel = await api.createNote(untitledName(taken));
+      const rel = await api.createNote(at);
       applyInfo(await api.refresh());
       await openNote(rel);
       setTreeEditing({ path: rel, kind: "note" });
@@ -541,21 +719,22 @@ export default function App() {
       say(String(e));
     }
   };
+  const newNote = () => newNoteIn();
 
-  /** Tạo folder ngay ở gốc vault với tên Untitled rồi cho đặt tên inline. */
-  const newFolder = async () => {
+  /** Tạo folder con của `dir` ("" = gốc vault) với tên Untitled rồi đặt tên inline. */
+  const newFolderIn = async (dir = "") => {
     if (treeEditing()) return;
-    const taken = new Set(
-      dirs().filter((d) => !d.includes("/")).map((d) => d.toLowerCase()),
-    );
+    const taken = new Set(childrenOf(dirs(), dir).map((d) => d.toLowerCase()));
+    const at = dir ? `${dir}/${untitledName(taken)}` : untitledName(taken);
     try {
-      const rel = await api.createFolder(untitledName(taken));
+      const rel = await api.createFolder(at);
       applyInfo(await api.refresh());
       setTreeEditing({ path: rel, kind: "dir" });
     } catch (e) {
       say(String(e));
     }
   };
+  const newFolder = () => newFolderIn();
 
   /** Xác nhận tên từ ô rename inline: đổi tên nếu khác, giữ nguyên nếu rỗng/không đổi. */
   const finishTreeRename = async (name: string) => {
@@ -573,6 +752,7 @@ export default function App() {
         await api.renameNote(ed.path, to);
         applyInfo(await api.refresh());
         retargetTabs(ed.path, to);
+        void retargetBookmark(ed.path, to);
         currentPath = null;
         await openNote(to);
       } else {
@@ -598,6 +778,7 @@ export default function App() {
           applyInfo(await api.refresh());
           const newPath = (to.trim().toLowerCase().endsWith(".md") ? to.trim() : to.trim() + ".md").replace(/\\/g, "/");
           retargetTabs(from, newPath);
+          void retargetBookmark(from, newPath);
           currentPath = null;
           await openNote(newPath);
           say(`Đã đổi tên, rewrite ${n} link trỏ tới`);
@@ -608,28 +789,333 @@ export default function App() {
     });
   };
 
-  const trashCurrent = () => {
-    const path = current();
-    if (!path) return;
-    setPromptCfg({
-      title: `Gõ "xoa" để chuyển "${path}" vào thùng rác (.brain/trash)`,
-      value: "",
-      onOk: async (v) => {
-        if (v.trim().toLowerCase() !== "xoa") return;
+  /** Hỏi trước khi làm, trừ khi user đã tick "Đừng hỏi lại". */
+  const askConfirm = (
+    cfg: { title: string; message: string; detail: string; confirmLabel: string },
+    onOk: () => void,
+  ) => {
+    if (localStorage.getItem("skipDeleteConfirm") === "1") return onOk();
+    setDontAsk(false);
+    setConfirmCfg({ ...cfg, onOk });
+  };
+
+  /** Bấm nút xác nhận: nhớ lựa chọn "đừng hỏi lại" rồi mới chạy hành động. */
+  const confirmNow = () => {
+    const cfg = confirmCfg();
+    if (!cfg) return;
+    if (dontAsk()) localStorage.setItem("skipDeleteConfirm", "1");
+    setConfirmCfg(null);
+    cfg.onOk();
+  };
+
+  const trashNoteAt = (path: string) => {
+    askConfirm(
+      {
+        title: isCanvas(path) ? "Xóa canvas" : "Xóa file",
+        message: `Bạn có chắc muốn xóa "${path.split("/").pop()}"?`,
+        detail: "File sẽ được chuyển vào thùng rác của vault (.brain/trash).",
+        confirmLabel: "Xóa",
+      },
+      async () => {
         try {
           await api.trashNote(path);
           retargetTabs(path, null);
-          currentPath = null;
-          setCurrent(null);
-          editor.setContent("");
+          void dropBookmark(path);
+          if (isCanvas(path)) {
+            setCanvases(await api.listCanvases().catch(() => []));
+            if (canvasPath() === path) {
+              setCanvasPath(null);
+              setView("editor");
+            }
+          } else if (current() === path) {
+            // Chỉ dọn editor khi xóa đúng note đang mở; xóa note khác giữ nguyên.
+            currentPath = null;
+            setCurrent(null);
+            editor.setContent("");
+          }
           applyInfo(await api.refresh());
           say("Đã chuyển vào thùng rác");
         } catch (e) {
           say(String(e));
         }
       },
+    );
+  };
+
+  const trashCurrent = () => {
+    const path = current();
+    if (path) trashNoteAt(path);
+  };
+
+  const trashFolderAt = (path: string) => {
+    const n = notes().filter((x) => x.path.startsWith(`${path}/`)).length;
+    askConfirm(
+      {
+        title: "Xóa thư mục",
+        message: `Bạn có chắc muốn xóa "${path}"?`,
+        detail: `Cả thư mục${n ? ` và ${n} note bên trong` : ""} sẽ được chuyển vào thùng rác của vault (.brain/trash).`,
+        confirmLabel: "Xóa",
+      },
+      async () => {
+        try {
+          await api.trashFolder(path);
+          // Mọi note bên trong đi theo folder → tab và bookmark trỏ vào đó phải rụng.
+          const inside = `${path}/`;
+          for (const note of notes()) {
+            if (note.path.startsWith(inside)) {
+              retargetTabs(note.path, null);
+              void dropBookmark(note.path);
+            }
+          }
+          if (current()?.startsWith(inside)) {
+            currentPath = null;
+            setCurrent(null);
+            editor.setContent("");
+          }
+          applyInfo(await api.refresh());
+          say("Đã chuyển thư mục vào thùng rác");
+        } catch (e) {
+          say(String(e));
+        }
+      },
+    );
+  };
+
+  // ---- Bookmark ----
+
+  const isBookmarked = (path: string) => bookmarks().some((b) => b.path === path);
+
+  const putBookmarks = async (list: Bookmark[]) => {
+    setBookmarks(list);
+    const v = root();
+    if (v) await saveBookmarks(v, list);
+  };
+
+  const dropBookmark = (path: string) =>
+    putBookmarks(bookmarks().filter((b) => b.path !== path));
+
+  /** Note đổi tên/di chuyển → bookmark phải theo, nếu không sẽ trỏ vào hư không. */
+  const retargetBookmark = (from: string, to: string) =>
+    putBookmarks(bookmarks().map((b) => (b.path === from ? { ...b, path: to } : b)));
+
+  const addBookmark = (path: string) => {
+    setPromptCfg({
+      title: "Tên hiển thị của bookmark",
+      value: fileLabel(path),
+      onOk: async (v) => {
+        const title = v.trim() || fileLabel(path);
+        await putBookmarks([...bookmarks().filter((b) => b.path !== path), { path, title }]);
+      },
     });
   };
+
+  // ---- Menu chuột phải ----
+
+  /** Tên hiển thị của một path: bỏ thư mục và đuôi .md/.canvas. */
+  const fileLabel = (p: string) => p.split("/").pop()!.replace(/\.(md|canvas)$/i, "");
+
+  const isCanvas = (p: string) => /\.canvas$/i.test(p);
+
+  /** Mở đúng loại view theo đuôi file (bookmark, cửa sổ rời, sau khi move…). */
+  const openByPath = async (p: string) => (isCanvas(p) ? openCanvas(p) : await openNote(p));
+
+  const openInNewTab = async (p: string) => {
+    if (!isCanvas(p)) return openNoteInNewTab(p);
+    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    setTabs((ts) => [...ts, t]);
+    setActiveId(t.id);
+    openCanvas(p);
+  };
+
+  const copyText = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      say(`Đã copy ${what}`);
+    } catch {
+      // WebView không cho clipboard API (context không "secure") → cách cũ.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      say(`Đã copy ${what}`);
+    }
+  };
+
+  /** Mục "Copy path ▸" dùng chung cho note, folder và canvas. */
+  const copyPathItem = (path: string): MenuItem => ({
+    label: "Copy path",
+    icon: IconCopyPath,
+    submenu: [
+      {
+        label: "Đường dẫn trong vault",
+        onSelect: () => void copyText(path, "đường dẫn"),
+      },
+      {
+        label: "Đường dẫn tuyệt đối",
+        onSelect: async () => {
+          try {
+            await copyText(await api.absPath(path), "đường dẫn tuyệt đối");
+          } catch (e) {
+            say(String(e));
+          }
+        },
+      },
+    ],
+  });
+
+  const osItems = (path: string): MenuItem[] => [
+    {
+      label: "Mở bằng app mặc định",
+      icon: IconOpenExternal,
+      onSelect: () => void api.openExternal(path).catch((e) => say(String(e))),
+    },
+    {
+      label: "Hiện trong File Explorer",
+      icon: IconReveal,
+      onSelect: () => void api.revealInExplorer(path).catch((e) => say(String(e))),
+    },
+  ];
+
+  /** Di chuyển sang folder khác. Note đi qua `renameNote` để wikilink được
+   *  rewrite; canvas không nằm trong link graph nên dùng `renameFile`. */
+  const moveFileTo = (path: string) => {
+    setFolderQuery("");
+    setFolderPick({
+      title: `Di chuyển "${fileLabel(path)}" tới…`,
+      onOk: async (dir) => {
+        const name = path.split("/").pop()!;
+        const to = dir ? `${dir}/${name}` : name;
+        if (to === path) return;
+        try {
+          editor.flush();
+          if (isCanvas(path)) {
+            await api.renameFile(path, to);
+            setCanvases(await api.listCanvases().catch(() => []));
+            retargetTabs(path, to);
+            if (canvasPath() === path) openCanvas(to);
+            say("Đã di chuyển canvas");
+          } else {
+            const n = await api.renameNote(path, to);
+            applyInfo(await api.refresh());
+            retargetTabs(path, to);
+            if (current() === path) {
+              currentPath = null;
+              await openNote(to);
+            }
+            say(`Đã di chuyển, rewrite ${n} link trỏ tới`);
+          }
+          void retargetBookmark(path, to);
+        } catch (e) {
+          say(String(e));
+        }
+      },
+    });
+  };
+
+  /** Đổi tên tại chỗ (giữ nguyên folder). Note dùng ô inline trong tree; canvas
+   *  không nằm trong tree nên hỏi qua modal. */
+  const renameFileAt = (path: string) => {
+    if (!isCanvas(path)) return setTreeEditing({ path, kind: "note" });
+    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    setPromptCfg({
+      title: "Tên mới cho canvas",
+      value: fileLabel(path),
+      onOk: async (v) => {
+        const clean = v.trim().replace(/[\\/]/g, "");
+        if (!clean || clean === fileLabel(path)) return;
+        try {
+          const to = await api.renameFile(path, `${dir}${clean}`);
+          setCanvases(await api.listCanvases().catch(() => []));
+          retargetTabs(path, to);
+          void retargetBookmark(path, to);
+          if (canvasPath() === path) openCanvas(to);
+        } catch (e) {
+          say(String(e));
+        }
+      },
+    });
+  };
+
+  const duplicateFile = async (path: string) => {
+    try {
+      const rel = await api.duplicateNote(path);
+      if (isCanvas(path)) {
+        setCanvases(await api.listCanvases().catch(() => []));
+        openCanvas(rel);
+      } else {
+        applyInfo(await api.refresh());
+        await openNote(rel);
+      }
+      say(`Đã tạo bản sao: ${rel}`);
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  /** Menu cho một file trong vault — dùng chung cho note và canvas. */
+  const fileMenu = (path: string): MenuItem[] => [
+    { label: "Mở trong tab mới", icon: IconOpenNewTab, onSelect: () => void openInNewTab(path) },
+    {
+      label: "Mở trong cửa sổ mới",
+      icon: IconNewWindow,
+      onSelect: () => void api.openNoteWindow(path).catch((e) => say(String(e))),
+    },
+    { separator: true, label: "" },
+    { label: "Nhân bản", icon: IconDuplicate, onSelect: () => void duplicateFile(path) },
+    { label: "Di chuyển tới…", icon: IconMove, onSelect: () => moveFileTo(path) },
+    isBookmarked(path)
+      ? { label: "Bỏ bookmark", icon: IconUnbookmark, onSelect: () => void dropBookmark(path) }
+      : { label: "Bookmark…", icon: IconBookmark, onSelect: () => addBookmark(path) },
+    { separator: true, label: "" },
+    copyPathItem(path),
+    {
+      label: "Lịch sử phiên bản",
+      icon: IconHistory,
+      onSelect: () => void openHistoryFor(path),
+    },
+    { separator: true, label: "" },
+    ...osItems(path),
+    { separator: true, label: "" },
+    { label: "Đổi tên…", icon: IconRename, onSelect: () => renameFileAt(path) },
+    { label: "Xóa", icon: IconTrash, danger: true, onSelect: () => trashNoteAt(path) },
+  ];
+
+  const dirMenu = (path: string): MenuItem[] => [
+    { label: "Note mới ở đây", icon: IconNewNote, onSelect: () => void newNoteIn(path) },
+    { label: "Folder con mới", icon: IconNewFolder, onSelect: () => void newFolderIn(path) },
+    { separator: true, label: "" },
+    copyPathItem(path),
+    {
+      label: "Hiện trong File Explorer",
+      icon: IconReveal,
+      onSelect: () => void api.revealInExplorer(path).catch((e) => say(String(e))),
+    },
+    { separator: true, label: "" },
+    { label: "Đổi tên…", icon: IconRename, onSelect: () => setTreeEditing({ path, kind: "dir" }) },
+    { label: "Xóa", icon: IconTrash, danger: true, onSelect: () => trashFolderAt(path) },
+  ];
+
+  const rootMenu = (): MenuItem[] => [
+    { label: "Note mới", icon: IconNewNote, onSelect: () => void newNoteIn() },
+    { label: "Folder mới", icon: IconNewFolder, onSelect: () => void newFolderIn() },
+    { separator: true, label: "" },
+    {
+      label: "Hiện vault trong File Explorer",
+      icon: IconReveal,
+      onSelect: () => void api.revealInExplorer("").catch((e) => say(String(e))),
+    },
+  ];
+
+  const openCtx = (e: MouseEvent, items: MenuItem[]) =>
+    setCtxMenu({ x: e.clientX, y: e.clientY, items });
+
+  /** Folder đích cho hộp "Di chuyển tới…" — kèm gốc vault ở đầu. */
+  const folderHits = createMemo(() => {
+    const q = folderQuery().trim().toLowerCase();
+    return ["", ...dirs()].filter((d) => !q || d.toLowerCase().includes(q));
+  });
 
   // Omnibar: lọc theo title trước, gọi FTS song song
   let omniTimer: ReturnType<typeof setTimeout>;
@@ -678,7 +1164,7 @@ export default function App() {
     if (q && !items.some((i) => i.label.toLowerCase() === q.toLowerCase())) {
       items.push({
         path: CREATE_SENTINEL,
-        label: `＋ Tạo note "${q}"`,
+        label: `Tạo note "${q}"`,
         sub: "Enter để tạo và mở",
         line: 0,
       });
@@ -835,10 +1321,9 @@ export default function App() {
     if (!chatOpen()) toggleChat();
   };
 
-  /** Mở modal 🕘 lịch sử phiên bản của note đang mở. */
-  const openHistory = async () => {
-    const p = current();
-    if (!p) return;
+  /** Mở modal 🕘 lịch sử phiên bản của một note bất kỳ (không nhất thiết đang mở). */
+  const openHistoryFor = async (p: string) => {
+    setHistPath(p);
     setHistoryOpen(true);
     setRevSel(null);
     setRevContent("");
@@ -848,6 +1333,11 @@ export default function App() {
       say(String(e));
       setRevs([]);
     }
+  };
+
+  const openHistory = () => {
+    const p = current();
+    if (p) void openHistoryFor(p);
   };
 
   const pickRev = async (id: number) => {
@@ -861,11 +1351,14 @@ export default function App() {
 
   /** Khôi phục revision: áp vào editor dạng transaction (Ctrl+Z quay lại được) + lưu. */
   const restoreRev = async () => {
-    const p = current();
+    const p = histPath();
     const id = revSel();
     if (!p || id == null) return;
     try {
       const content = await api.historyGet(id);
+      // Modal có thể đang xem lịch sử của note khác note đang mở — phải mở nó
+      // lên trước, nếu không editor.updateContent sẽ ghi đè nhầm note.
+      if (current() !== p) await openNote(p);
       editor.updateContent(content);
       await api.writeNote(p, content);
       applyInfo(await api.refresh());
@@ -959,6 +1452,7 @@ export default function App() {
   onMount(() => {
     editor = createEditor({
       parent: editorHost,
+      dark: isDark(),
       getNotes: notes,
       onSave: saveCurrent,
       onOpenLink: openByTarget,
@@ -976,6 +1470,10 @@ export default function App() {
       if (last) await openVaultAt(last);
     })();
 
+    // CodeMirror lấy màu qua var() nên tự đổi, nhưng cờ dark và diagram mermaid
+    // (SVG đã render sẵn) thì phải báo tay.
+    createEffect(() => editor.setDark(isDark()));
+
     // Ghi lại workspace mỗi khi tab hoặc trạng thái tree đổi. autoSave của plugin
     // gộp các lần ghi liên tiếp nên chuyển tab nhanh không đập đĩa.
     createEffect(() => {
@@ -983,25 +1481,19 @@ export default function App() {
       const ts = tabs();
       const active = activeId();
       const closed = closedDirs();
-      if (!vault || restoring()) return;
+      // Cửa sổ note rời chỉ có đúng 1 tab — để nó ghi thì bộ tab của cửa sổ
+      // chính bị xóa sạch ngay khi mở.
+      if (!vault || restoring() || SOLO_NOTE) return;
       const persisted: PersistedTab[] = ts.map((t) => ({ kind: t.kind, path: t.path }));
       const idx = Math.max(0, ts.findIndex((t) => t.id === active));
       void saveWorkspace(vault, { tabs: persisted, activeIndex: idx, closedDirs: [...closed] });
     });
 
-    // Tiến độ & trạng thái embedding từ worker semantic.
-    const unlistenProgress = listen<[number, number]>("semantic-progress", (e) => {
-      const [done, total] = e.payload;
-      setSemStatus(done < total ? `embedding ${done}/${total}` : "");
-    });
-    const unlistenStatus = listen<string>("semantic-status", (e) => setSemStatus(e.payload));
     const unlistenJanitor = listen<JanitorReport>("janitor-report-ready", (e) => {
       setJanitorReport(e.payload);
       setJanitorBadge(true);
     });
     onCleanup(() => {
-      unlistenProgress.then((f) => f());
-      unlistenStatus.then((f) => f());
       unlistenJanitor.then((f) => f());
     });
 
@@ -1044,6 +1536,8 @@ export default function App() {
         setSettingsOpen(false);
         setJanitorOpen(false);
         setHistoryOpen(false);
+        setFolderPick(null);
+        setConfirmCfg(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1056,24 +1550,30 @@ export default function App() {
   return (
     <div class="app" classList={{ "chat-open": chatOpen(), "right-closed": !rightOpen() }}>
       <nav class="ribbon">
-        <button title="Tìm hoặc tạo note (Ctrl+K / Ctrl+O)" onClick={() => { setOmniOpen(true); setOmniQuery(""); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}>🔍</button>
-        <button title="Hỏi đáp vault" onClick={() => { setOmniOpen(true); setOmniQuery("? "); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}>💬</button>
-        <button title="Graph view (Ctrl+G)" classList={{ active: view() === "graph" }} onClick={toggleGraph}>🕸</button>
-        <button title="Daily note hôm nay" onClick={openDaily}>📅</button>
-        <button title="Canvas mới" onClick={newCanvas}>🧩</button>
-        <button title="Janitor: lint & dọn dẹp" onClick={runJanitor}>🧹</button>
-        <button title="Sync GitHub: add → commit → push" disabled={syncBusy()} onClick={gitSync}>⇅</button>
-        <button title="Chat với agent (sửa nội dung, format, cấu trúc vault)" classList={{ active: chatOpen() }} onClick={toggleChat}>🤖</button>
-        <button title="Terminal chạy claude (Ctrl+`)" classList={{ active: termVisible() }} onClick={() => setTermVisible((v) => !v)}>🖥</button>
+        <button title="Tìm hoặc tạo note (Ctrl+K / Ctrl+O)" onClick={() => { setOmniOpen(true); setOmniQuery(""); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}><IconSearch /></button>
+        <button title="Hỏi đáp vault" onClick={() => { setOmniOpen(true); setOmniQuery("? "); setAnswer(null); queueMicrotask(() => omniInput?.focus()); }}><IconAsk /></button>
+        <button title="Graph view (Ctrl+G)" classList={{ active: view() === "graph" }} onClick={toggleGraph}><IconGraph /></button>
+        <button title="Daily note hôm nay" onClick={openDaily}><IconDaily /></button>
+        <button title="Canvas mới" onClick={newCanvas}><IconCanvas /></button>
+        <button title="Janitor: lint & dọn dẹp" onClick={runJanitor}><IconJanitor /></button>
+        <button title="Sync GitHub: add → commit → push" disabled={syncBusy()} onClick={gitSync}><IconSync /></button>
+        <button title="Chat với agent (sửa nội dung, format, cấu trúc vault)" classList={{ active: chatOpen() }} onClick={toggleChat}><IconAgent /></button>
+        <button title="Terminal chạy claude (Ctrl+`)" classList={{ active: termVisible() }} onClick={() => setTermVisible((v) => !v)}><IconTerminal /></button>
         <div class="ribbon-spacer" />
-        <button title="Vault: chuyển hoặc mở thư mục khác" onClick={() => setVaultOpen(true)}>🗂</button>
-        <button title="Settings" onClick={openSettings}>⚙</button>
+        <button
+          title={`Theme: ${theme() === "dark" ? "tối" : "sáng"} — bấm để đổi`}
+          onClick={toggleTheme}
+        >
+          {theme() === "dark" ? <IconDark /> : <IconLight />}
+        </button>
+        <button title="Vault: chuyển hoặc mở thư mục khác" onClick={() => setVaultOpen(true)}><IconVault /></button>
+        <button title="Settings" onClick={openSettings}><IconSettings /></button>
       </nav>
 
       <aside class="sidebar">
         <div class="sidebar-head">
-          <button title="Note mới (Ctrl+N)" onClick={newNote}>＋</button>
-          <button title="Folder mới" onClick={newFolder}>🗀</button>
+          <button title="Note mới (Ctrl+N)" onClick={newNote}><IconNewNote /></button>
+          <button title="Folder mới" onClick={newFolder}><IconNewFolder /></button>
           <button
             title="Re-index"
             onClick={async () => {
@@ -1082,11 +1582,40 @@ export default function App() {
               say(`Re-indexed (${stats()?.index_ms}ms)`);
             }}
           >
-            ⟳
+            <IconReindex />
           </button>
         </div>
         <Show when={root()} fallback={<div class="tree-empty">Chưa mở vault</div>}>
           <div class="tree-scroll">
+            <Show when={bookmarks().length > 0}>
+              <details class="bookmarks" open={bmOpen()} onToggle={(e) => setBmOpen(e.currentTarget.open)}>
+                <summary class="tree-dir">
+                  <IconDirArrow class="tree-dir-arrow" />
+                  Bookmark
+                </summary>
+                <div class="tree-indent">
+                  <For each={bookmarks()}>
+                    {(b) => (
+                      <div
+                        class="tree-file"
+                        classList={{ active: current() === b.path }}
+                        onClick={(e) =>
+                          e.ctrlKey ? void openInNewTab(b.path) : void openByPath(b.path)
+                        }
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openCtx(e, fileMenu(b.path));
+                        }}
+                        title={b.path}
+                      >
+                        {b.title}
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </details>
+            </Show>
             <Tree
               notes={notes()}
               dirs={dirs()}
@@ -1098,6 +1627,9 @@ export default function App() {
               onOpenNewTab={openNoteInNewTab}
               onRename={finishTreeRename}
               onToggleDir={toggleDir}
+              onContextNote={(e, p) => openCtx(e, fileMenu(p))}
+              onContextDir={(e, p) => openCtx(e, dirMenu(p))}
+              onContextRoot={(e) => openCtx(e, rootMenu())}
             />
             <Show when={canvases().length > 0}>
               <div class="panel-title">Canvas</div>
@@ -1106,7 +1638,13 @@ export default function App() {
                   <div
                     class="tree-file canvas-item"
                     classList={{ active: view() === "canvas" && canvasPath() === c }}
-                    onClick={() => openCanvas(c)}
+                    onClick={(e) => (e.ctrlKey ? void openInNewTab(c) : openCanvas(c))}
+                    onAuxClick={(e) => e.button === 1 && void openInNewTab(c)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openCtx(e, fileMenu(c));
+                    }}
                   >
                     {c.replace(/\.canvas$/i, "")}
                     <span class="canvas-badge">CANVAS</span>
@@ -1129,6 +1667,7 @@ export default function App() {
                 onAuxClick={(e) => e.button === 1 && closeTab(t.id)}
                 title={t.path ?? "Tab trống"}
               >
+                <TabIcon kind={t.kind} />
                 <span class="tab-label">{tabTitle(t)}</span>
                 <button
                   class="tab-close"
@@ -1138,29 +1677,35 @@ export default function App() {
                     closeTab(t.id);
                   }}
                 >
-                  ×
+                  <IconClose />
                 </button>
               </div>
             )}
           </For>
-          <button class="tab-add" title="Tab mới (Ctrl+T)" onClick={newTab}>＋</button>
+          <button class="tab-add" title="Tab mới (Ctrl+T)" onClick={newTab}><IconAdd /></button>
           <div class="tabbar-spacer" />
           <button
             class="tab-add"
             title={rightOpen() ? "Đóng panel phải (backlinks)" : "Mở panel phải (backlinks)"}
             onClick={toggleRight}
           >
-            {rightOpen() ? "◨" : "◧"}
+            {rightOpen() ? <IconPanelClose /> : <IconPanelOpen />}
           </button>
         </div>
         <div class="note-header">
           <span class="note-path">
-            {view() === "graph" ? "🕸 Graph view" : view() === "canvas" ? `🧩 ${canvasPath() ?? ""}` : current() ?? ""}
+            <Show when={view() === "graph"}>
+              <IconGraph />
+            </Show>
+            <Show when={view() === "canvas"}>
+              <IconCanvas />
+            </Show>
+            {view() === "graph" ? "Graph view" : view() === "canvas" ? canvasPath() ?? "" : current() ?? ""}
           </span>
           <Show when={view() === "editor" && current()}>
-            <button title="Lịch sử phiên bản (mọi thay đổi của bạn & AI)" onClick={openHistory}>🕘</button>
-            <button title="Đổi tên / di chuyển" onClick={renameCurrent}>✎</button>
-            <button title="Chuyển vào thùng rác" onClick={trashCurrent}>🗑</button>
+            <button title="Lịch sử phiên bản (mọi thay đổi của bạn & AI)" onClick={openHistory}><IconHistory /></button>
+            <button title="Đổi tên / di chuyển" onClick={renameCurrent}><IconRename /></button>
+            <button title="Chuyển vào thùng rác" onClick={trashCurrent}><IconTrash /></button>
           </Show>
         </div>
         <div
@@ -1186,7 +1731,7 @@ export default function App() {
               </button>
             </Show>
             <p class="hint">
-              Ctrl+K tìm/tạo · ? hỏi đáp · Ctrl+G graph · 📅 daily note · [[ autocomplete · Ctrl+Click mở link
+              Ctrl+K tìm/tạo · ? hỏi đáp · Ctrl+G graph · daily note · [[ autocomplete · Ctrl+Click mở link
             </p>
           </div>
         </Show>
@@ -1198,13 +1743,7 @@ export default function App() {
             <CanvasView
               path={p as string}
               onOpenNote={openNote}
-              requestNotePick={(cb) =>
-                setPromptCfg({
-                  title: "Đường dẫn note cần thêm vào canvas (vd: Tech/Rust.md)",
-                  value: "",
-                  onOk: (v) => v.trim() && cb(v.trim()),
-                })
-              }
+              requestNotePick={openNotePicker}
             />
           )}
         </Show>
@@ -1243,7 +1782,7 @@ export default function App() {
             {(r) => (
               <div class="backlink" onClick={() => openNote(r.path)} title={r.path}>
                 <div class="backlink-title">{r.title}</div>
-                <div class="backlink-path">{r.heading_path || r.path}</div>
+                <div class="backlink-path">{r.reason || r.path}</div>
               </div>
             )}
           </For>
@@ -1254,7 +1793,7 @@ export default function App() {
       <Show when={fabSel()}>
         {(s) => (
           <button class="sel-fab" style={anchor(s(), 210, 30)} onClick={openAi}>
-            🤖 Sửa bằng AI <span class="sel-kbd">Ctrl+Shift+L</span>
+            <IconAi /> Sửa bằng AI <span class="sel-kbd">Ctrl+Shift+L</span>
           </button>
         )}
       </Show>
@@ -1263,9 +1802,9 @@ export default function App() {
         {(s) => (
           <div class="sel-pop" style={anchor(s(), 360, 190)}>
             <div class="sel-pop-head">
-              <span>🤖 Sửa {s().text.length} ký tự đã chọn</span>
+              <span><IconAi /> Sửa {s().text.length} ký tự đã chọn</span>
               <button title="Đóng (Esc)" onClick={() => setAiOpen(false)}>
-                ×
+                <IconClose />
               </button>
             </div>
             <input
@@ -1285,6 +1824,7 @@ export default function App() {
               <For each={SELECTION_ACTIONS}>
                 {(a) => (
                   <button class="sel-chip" disabled={aiBusy()} onClick={() => runAi(a.prompt)}>
+                    <a.icon />
                     {a.label}
                   </button>
                 )}
@@ -1300,7 +1840,7 @@ export default function App() {
                 </span>
               </Show>
               <button class="sel-tochat" disabled={aiBusy()} onClick={sendSelToChat}>
-                ➤ Gửi vào chat Agent
+                <IconSend /> Gửi vào chat Agent
               </button>
             </div>
             <Show when={aiError()}>
@@ -1330,11 +1870,8 @@ export default function App() {
               setJanitorOpen(true);
             }}
           >
-            🧹 báo cáo mới
+            <IconJanitor /> báo cáo mới
           </span>
-        </Show>
-        <Show when={semStatus()}>
-          <span class="sem-status">{semStatus()}</span>
         </Show>
         <Show when={stats()}>
           <span>
@@ -1459,8 +1996,32 @@ export default function App() {
       <Show when={settingsOpen()}>
         <div class="overlay" onClick={() => setSettingsOpen(false)}>
           <div class="prompt-modal settings-modal" onClick={(e) => e.stopPropagation()}>
-            <div class="prompt-title">Settings — LLM cho hỏi đáp & reasoning search</div>
+            <div class="prompt-title">Settings</div>
             <div class="settings-body">
+              <div class="settings-section">Giao diện</div>
+              <div class="theme-choices">
+                <For
+                  each={
+                    [
+                      { v: "system", label: "Theo hệ thống", icon: IconSystemTheme },
+                      { v: "light", label: "Sáng", icon: IconLight },
+                      { v: "dark", label: "Tối", icon: IconDark },
+                    ] as { v: ThemePref; label: string; icon: typeof IconLight }[]
+                  }
+                >
+                  {(opt) => (
+                    <button
+                      class="theme-choice"
+                      classList={{ active: themePref() === opt.v }}
+                      onClick={() => setThemePref(opt.v)}
+                    >
+                      <opt.icon />
+                      <span>{opt.label}</span>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="settings-section">LLM cho hỏi đáp & reasoning search</div>
               <For
                 each={[
                   { v: "auto", label: "Tự động (ưu tiên Claude)" },
@@ -1493,8 +2054,8 @@ export default function App() {
                           (opt.v === "codex" && llm() != null && !llm()!.codex_ok),
                       }}
                     >
-                      {opt.v === "claude" && (llm()?.claude_ok ? "✓ có sẵn" : "✗ không thấy trên PATH")}
-                      {opt.v === "codex" && (llm()?.codex_ok ? "✓ có sẵn" : "✗ không thấy trên PATH")}
+                      {opt.v === "claude" && (llm()?.claude_ok ? <><IconOk /> có sẵn</> : <><IconClose /> không thấy trên PATH</>)}
+                      {opt.v === "codex" && (llm()?.codex_ok ? <><IconOk /> có sẵn</> : <><IconClose /> không thấy trên PATH</>)}
                     </span>
                   </label>
                 )}
@@ -1511,10 +2072,10 @@ export default function App() {
         <div class="overlay" onClick={() => setJanitorOpen(false)}>
           <div class="prompt-modal janitor-modal" onClick={(e) => e.stopPropagation()}>
             <div class="prompt-title">
-              🧹 Janitor
+              <IconJanitor /> Janitor
               <Show when={janitorReport()}>
                 {" — snapshot: "}
-                {janitorReport()!.snapshotted ? "✓ git" : "✗ (cài git để an toàn hơn)"}
+                {janitorReport()!.snapshotted ? <><IconOk /> git</> : <><IconClose /> (cài git để an toàn hơn)</>}
               </Show>
             </div>
             <div class="janitor-body">
@@ -1525,7 +2086,7 @@ export default function App() {
                 <Show when={janitorReport()!.applied.length > 0}>
                   <div class="panel-title">Đã tự sửa</div>
                   <For each={janitorReport()!.applied}>
-                    {(a) => <div class="jan-item jan-ok">✓ {a.description}</div>}
+                    {(a) => <div class="jan-item jan-ok"><IconOk /> {a.description}</div>}
                   </For>
                 </Show>
                 <Show when={janitorReport()!.proposals.length > 0}>
@@ -1560,7 +2121,7 @@ export default function App() {
                     0
                   }
                 >
-                  <div class="ask-hint">Vault sạch sẽ, không có gì để làm 🎉</div>
+                  <div class="ask-hint"><IconAllClear /> Vault sạch sẽ, không có gì để làm</div>
                 </Show>
               </Show>
             </div>
@@ -1571,7 +2132,7 @@ export default function App() {
       <Show when={historyOpen()}>
         <div class="overlay" onClick={() => setHistoryOpen(false)}>
           <div class="prompt-modal history-modal" onClick={(e) => e.stopPropagation()}>
-            <div class="prompt-title">🕘 Lịch sử phiên bản — {current()}</div>
+            <div class="prompt-title"><IconHistory /> Lịch sử phiên bản — {current()}</div>
             <div class="history-body">
               <Show
                 when={revs().length > 0}
@@ -1602,11 +2163,69 @@ export default function App() {
                   >
                     <pre class="history-content">{revContent()}</pre>
                     <button class="ask-save" onClick={restoreRev}>
-                      ↩ Khôi phục bản này
+                      <IconRestore /> Khôi phục bản này
                     </button>
                   </Show>
                 </div>
               </Show>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={notePick()}>
+        <div class="overlay" onClick={() => setNotePick(null)}>
+          <div class="omnibar" onClick={(e) => e.stopPropagation()}>
+            <input
+              ref={pickInput}
+              placeholder="Tìm note để gắn vào canvas…"
+              value={pickQuery()}
+              onInput={(e) => {
+                setPickQuery(e.currentTarget.value);
+                setPickSel(0);
+              }}
+              onKeyDown={(e) => {
+                const n = pickHits().length;
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setPickSel((i) => (n ? (i + 1) % n : 0));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setPickSel((i) => (n ? (i - 1 + n) % n : 0));
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmPick();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setNotePick(null);
+                }
+              }}
+            />
+            <div class="omni-results">
+              <Show
+                when={pickHits().length > 0}
+                fallback={<div class="omni-item omni-sub">Không có note nào khớp</div>}
+              >
+                <For each={pickHits()}>
+                  {(n, i) => (
+                    <div
+                      class="omni-item"
+                      classList={{ selected: i() === pickSel() }}
+                      onMouseEnter={() => setPickSel(i())}
+                      onClick={confirmPick}
+                    >
+                      <div class="omni-label">{n.title}</div>
+                      <div class="omni-sub">
+                        {n.path} · {fmtAgo(n.mtime)}
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+            <div class="prompt-hint">
+              {pickQuery().trim() ? "Kết quả tìm kiếm" : "Sửa gần đây"} · ↑↓ chọn · Enter gắn vào
+              canvas · Esc hủy
             </div>
           </div>
         </div>
@@ -1630,6 +2249,87 @@ export default function App() {
             <div class="prompt-hint">Enter để xác nhận · Esc để hủy</div>
           </div>
         </div>
+      </Show>
+
+      <Show when={folderPick()}>
+        <div class="overlay" onClick={() => setFolderPick(null)}>
+          <div class="prompt-modal" onClick={(e) => e.stopPropagation()}>
+            <div class="prompt-title">{folderPick()!.title}</div>
+            <input
+              autofocus
+              placeholder="Lọc folder…"
+              value={folderQuery()}
+              onInput={(e) => setFolderQuery(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setFolderPick(null);
+              }}
+            />
+            <div class="omni-results">
+              <For each={folderHits()}>
+                {(d) => (
+                  <div
+                    class="omni-item"
+                    onClick={() => {
+                      const cfg = folderPick()!;
+                      setFolderPick(null);
+                      cfg.onOk(d);
+                    }}
+                  >
+                    <div class="omni-label">{d || "(gốc vault)"}</div>
+                  </div>
+                )}
+              </For>
+            </div>
+            <div class="prompt-hint">Chọn folder đích · Esc để hủy</div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={confirmCfg()}>
+        {(c) => (
+          <div class="overlay" onClick={() => setConfirmCfg(null)}>
+            <div
+              class="confirm-modal"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") confirmNow();
+              }}
+            >
+              <div class="confirm-head">
+                <div class="confirm-title">{c().title}</div>
+                <button class="confirm-x" title="Đóng" onClick={() => setConfirmCfg(null)}>
+                  <IconClose />
+                </button>
+              </div>
+              <div class="confirm-body">
+                <p>{c().message}</p>
+                <p class="confirm-detail">{c().detail}</p>
+              </div>
+              <div class="confirm-foot">
+                <label class="confirm-skip">
+                  <input
+                    type="checkbox"
+                    checked={dontAsk()}
+                    onChange={(e) => setDontAsk(e.currentTarget.checked)}
+                  />
+                  Đừng hỏi lại
+                </label>
+                <div class="confirm-actions">
+                  <button class="btn-danger" autofocus onClick={confirmNow}>
+                    {c().confirmLabel}
+                  </button>
+                  <button class="btn-plain" onClick={() => setConfirmCfg(null)}>
+                    Hủy
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={ctxMenu()}>
+        {(m) => <ContextMenu anchor={m()} onClose={() => setCtxMenu(null)} />}
       </Show>
     </div>
   );

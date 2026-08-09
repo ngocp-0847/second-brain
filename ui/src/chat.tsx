@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { IconAgent, IconAttach, IconClose, IconLink, IconPin, IconRestart, IconTree, IconAi } from "./icons";
 import { api } from "./api";
 
 interface Msg {
@@ -12,23 +13,24 @@ interface Msg {
 
 /** Quick prompt nhắc tới note thì ghi đích danh path — agent không phải đoán "note đang mở". */
 const QUICK_PROMPTS: {
+  icon: typeof IconAi;
   label: string;
   needsNote?: boolean;
   text: (path: string | null) => string;
 }[] = [
   {
-    label: "✨ Làm đẹp note đang mở",
+    icon: IconAi, label: "Làm đẹp note đang mở",
     needsNote: true,
     text: (p) =>
       `Làm đẹp format cho đúng một file: "${p}". Chuẩn hóa heading, danh sách, code block, bảng. Giữ nguyên nội dung và wikilink. Không sửa file nào khác.`,
   },
   {
-    label: "🔗 Sửa link gãy",
+    icon: IconLink, label: "Sửa link gãy",
     text: () =>
       "Tìm các wikilink gãy trong vault và sửa lại cho trỏ đúng note (đổi tên gần đúng, heading đổi…). Liệt kê các link đã sửa.",
   },
   {
-    label: "🗂 Gợi ý cấu trúc vault",
+    icon: IconTree, label: "Gợi ý cấu trúc vault",
     text: () =>
       "Phân tích cấu trúc thư mục và tên file của vault, đề xuất cách tổ chức lại hợp lý hơn. Chỉ đề xuất, chưa di chuyển file.",
   },
@@ -125,12 +127,12 @@ export function ChatPanel(props: {
   return (
     <aside class="chatbar" style={{ display: props.visible ? "flex" : "none" }}>
       <div class="chat-head">
-        <span class="chat-title">🤖 Agent</span>
+        <span class="chat-title"><IconAgent /> Agent</span>
         <button title="Phiên mới (xóa ngữ cảnh hội thoại)" onClick={newSession}>
-          ⟳
+          <IconRestart />
         </button>
         <button title="Đóng panel chat" onClick={props.onClose}>
-          ×
+          <IconClose />
         </button>
       </div>
 
@@ -148,6 +150,7 @@ export function ChatPanel(props: {
                     title={q.needsNote && !props.currentPath ? "Mở một note trước đã" : undefined}
                     onClick={() => send(q.text(props.currentPath))}
                   >
+                    <q.icon />
                     {q.label}
                   </button>
                 )}
@@ -180,9 +183,9 @@ export function ChatPanel(props: {
           {(sel) => (
             <div class="chat-attach">
               <div class="chat-attach-head">
-                <span>📌 Vùng chọn ({sel().text.length} ký tự)</span>
+                <span><IconPin /> Vùng chọn ({sel().text.length} ký tự)</span>
                 <button title="Bỏ đính kèm" onClick={props.onClearSelection}>
-                  ×
+                  <IconClose />
                 </button>
               </div>
               <div class="chat-quote">{sel().text}</div>
@@ -204,7 +207,7 @@ export function ChatPanel(props: {
             checked={useContext()}
             onChange={(e) => setUseContext(e.currentTarget.checked)}
           />
-          📎 note đang mở{props.currentPath ? `: ${props.currentPath.split("/").pop()}` : ""}
+          <IconAttach /> note đang mở{props.currentPath ? `: ${props.currentPath.split("/").pop()}` : ""}
         </label>
         <textarea
           ref={box}

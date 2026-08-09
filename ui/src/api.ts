@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface NoteMeta {
   path: string;
   title: string;
+  /** Unix epoch giây — sắp xếp "sửa gần đây". */
+  mtime: number;
 }
 
 export interface Stats {
@@ -38,7 +40,8 @@ export interface Backlink {
 export interface RelatedNote {
   path: string;
   title: string;
-  heading_path: string;
+  /** Vì sao liên quan ("2 tag chung · trùng từ khóa"). */
+  reason: string;
 }
 
 export const api = {
@@ -46,7 +49,10 @@ export const api = {
   refresh: () => invoke<VaultInfo>("refresh"),
   readNote: (path: string) => invoke<string>("read_note", { path }),
   writeNote: (path: string, content: string) =>
-    invoke<void>("write_note", { path, content }),
+    invoke<null>("write_note", { path, content, withInfo: false }),
+  /** Lưu rồi trả luôn VaultInfo đã index — khỏi gọi refresh() thêm một lượt. */
+  writeNoteWithInfo: (path: string, content: string) =>
+    invoke<VaultInfo>("write_note", { path, content, withInfo: true }),
   createNote: (path: string) => invoke<string>("create_note", { path }),
   createFolder: (path: string) => invoke<string>("create_folder", { path }),
   renameFolder: (from: string, to: string) =>
@@ -54,6 +60,15 @@ export const api = {
   renameNote: (from: string, to: string) =>
     invoke<number>("rename_note", { from, to }),
   trashNote: (path: string) => invoke<void>("trash_note", { path }),
+  trashFolder: (path: string) => invoke<void>("trash_folder", { path }),
+  duplicateNote: (path: string) => invoke<string>("duplicate_note", { path }),
+  /** Đổi tên/di chuyển file không phải note (canvas…). Trả path mới. */
+  renameFile: (from: string, to: string) => invoke<string>("rename_file", { from, to }),
+  /** Đường dẫn tuyệt đối dạng native; path rỗng = thư mục gốc vault. */
+  absPath: (path: string) => invoke<string>("abs_path", { path }),
+  revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
+  openExternal: (path: string) => invoke<void>("open_external", { path }),
+  openNoteWindow: (path: string) => invoke<void>("open_note_window", { path }),
   search: (query: string, limit = 20) =>
     invoke<SearchHit[]>("search_notes", { query, limit }),
   backlinks: (path: string) => invoke<Backlink[]>("backlinks", { path }),

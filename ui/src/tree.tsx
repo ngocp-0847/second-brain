@@ -1,6 +1,8 @@
 // Cây thư mục dựng từ danh sách path phẳng của vault (kèm folder rỗng từ dirs).
 import { createMemo, For, Show } from "solid-js";
 import type { NoteMeta } from "./api";
+import { NOTE_DRAG_MIME } from "./dnd";
+import { IconDirArrow } from "./icons";
 
 export interface TreeEditing {
   path: string;
@@ -87,6 +89,8 @@ interface DirProps {
   onOpenNewTab?: (p: string) => void;
   onRename: (v: string) => void;
   onToggleDir: (path: string, open: boolean) => void;
+  onContextNote?: (e: MouseEvent, path: string) => void;
+  onContextDir?: (e: MouseEvent, path: string) => void;
 }
 
 function Dir(props: DirProps) {
@@ -102,7 +106,15 @@ function Dir(props: DirProps) {
               props.onToggleDir(d.path, e.currentTarget.open);
             }}
           >
-            <summary class="tree-dir">
+            <summary
+              class="tree-dir"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                props.onContextDir?.(e, d.path);
+              }}
+            >
+              <IconDirArrow class="tree-dir-arrow" />
               <Show
                 when={props.editing?.kind === "dir" && props.editing.path === d.path}
                 fallback={d.name}
@@ -121,12 +133,25 @@ function Dir(props: DirProps) {
           <div
             class="tree-file"
             classList={{ active: props.current === f.path }}
+            draggable
+            onDragStart={(e) => {
+              // Kéo thả vào canvas để chèn card note. Kèm text/plain cho các
+              // drop target khác (editor, app ngoài) vẫn nhận được đường dẫn.
+              e.dataTransfer?.setData(NOTE_DRAG_MIME, f.path);
+              e.dataTransfer?.setData("text/plain", f.path);
+              if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
+            }}
             onClick={(e) =>
               e.ctrlKey && props.onOpenNewTab
                 ? props.onOpenNewTab(f.path)
                 : props.onOpen(f.path)
             }
             onAuxClick={(e) => e.button === 1 && props.onOpenNewTab?.(f.path)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              props.onContextNote?.(e, f.path);
+            }}
             title={f.path}
           >
             <Show
@@ -153,6 +178,10 @@ export function Tree(props: {
   onOpenNewTab?: (p: string) => void;
   onRename: (v: string) => void;
   onToggleDir: (path: string, open: boolean) => void;
+  onContextNote?: (e: MouseEvent, path: string) => void;
+  onContextDir?: (e: MouseEvent, path: string) => void;
+  /** Chuột phải vào khoảng trống của tree = thao tác ở gốc vault. */
+  onContextRoot?: (e: MouseEvent) => void;
 }) {
   const filtered = createMemo(() => {
     const q = props.filter.trim().toLowerCase();
@@ -167,7 +196,15 @@ export function Tree(props: {
   );
 
   return (
-    <div class="tree">
+    <div
+      class="tree"
+      // Note/folder đã stopPropagation, nên tới đây chỉ còn chuột phải vào
+      // khoảng trống — kể cả khi rơi vào .tree-indent của một folder.
+      onContextMenu={(e) => {
+        e.preventDefault();
+        props.onContextRoot?.(e);
+      }}
+    >
       <Show when={filtered().length === 0 && props.dirs.length === 0}>
         <div class="tree-empty">Không có note nào</div>
       </Show>
@@ -181,6 +218,8 @@ export function Tree(props: {
         onOpenNewTab={props.onOpenNewTab}
         onRename={props.onRename}
         onToggleDir={props.onToggleDir}
+        onContextNote={props.onContextNote}
+        onContextDir={props.onContextDir}
       />
     </div>
   );
