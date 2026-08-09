@@ -1,5 +1,6 @@
 //! Hỏi–đáp trên vault (RAG):
-//! retrieve (BM25 + vector, RRF) → prompt kèm trích đoạn → LLM qua agent CLI có sẵn
+//! retrieve (BM25 trên câu hỏi + các biến thể, RRF) → prompt kèm trích đoạn →
+//! LLM qua agent CLI có sẵn
 //! (Claude Code CLI headless hoặc Codex CLI — tận dụng đăng nhập sẵn có, không cần API key).
 //!
 //! Nguyên tắc: chỉ các trích đoạn được retrieve mới vào prompt (không gửi cả vault);
@@ -118,17 +119,15 @@ pub fn expand_query(provider: Provider, question: &str) -> Vec<String> {
     }
 }
 
-/// Retrieve top-k chunk: FTS trên câu hỏi + các biến thể (reasoning) + vector, trộn RRF.
-/// `vec_hits` truyền từ ngoài vào (app lấy từ worker, CLI tự query) — rỗng nếu semantic tắt.
+/// Retrieve top-k chunk: FTS trên câu hỏi + các biến thể (reasoning), trộn RRF.
 /// `variants` — các truy vấn mở rộng từ `expand_query` (rỗng = chỉ dùng câu gốc).
 pub fn retrieve(
     db: &Db,
     question: &str,
     variants: &[String],
-    vec_hits: Vec<(i64, f64)>,
     k: usize,
 ) -> Result<Vec<SourceChunk>> {
-    // RRF trên nhiều danh sách: câu gốc (trọng số qua thứ tự), từng biến thể, rồi vector.
+    // RRF trên nhiều danh sách: câu gốc (trọng số qua thứ tự) rồi từng biến thể.
     use std::collections::HashMap;
     const RRF_K: f64 = 60.0;
     let mut scores: HashMap<i64, f64> = HashMap::new();
@@ -144,10 +143,6 @@ pub fn retrieve(
             *scores.entry(hit.chunk_id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
         }
     }
-    for (rank, (id, _)) in vec_hits.iter().enumerate() {
-        *scores.entry(*id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
-    }
-
     let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
     let ids: Vec<i64> = ranked.into_iter().take(k).map(|(id, _)| id).collect();
@@ -248,12 +243,12 @@ pub fn generate(provider: Provider, prompt: &str) -> Result<String> {
 }
 
 /// Pipeline đầy đủ: reasoning expand → retrieve → prompt → generate.
-pub fn ask(db: &Db, question: &str, vec_hits: Vec<(i64, f64)>) -> Result<Answer> {
+pub fn ask(db: &Db, question: &str) -> Result<Answer> {
     let provider = detect_provider().context(
         "không tìm thấy agent CLI nào (cần Claude Code CLI hoặc Codex CLI trên PATH)",
     )?;
     let variants = expand_query(provider, question);
-    let sources = retrieve(db, question, &variants, vec_hits, 6)?;
+    let sources = retrieve(db, question, &variants, 6)?;
     if sources.is_empty() {
         return Ok(Answer {
             text: "Vault chưa có nội dung nào liên quan để trả lời câu hỏi này.".into(),

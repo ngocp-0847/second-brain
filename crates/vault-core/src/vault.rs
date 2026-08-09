@@ -161,7 +161,7 @@ impl Vault {
             .and_then(|s| s.to_str())
             .unwrap_or(&new_norm)
             .to_string();
-        let stem_taken = self.db.note_list()?.iter().any(|(p, _)| {
+        let stem_taken = self.db.note_list()?.iter().any(|(p, _, _)| {
             p != &old_norm
                 && Path::new(p)
                     .file_stem()
@@ -295,16 +295,56 @@ impl Vault {
     /// "Xóa" = chuyển vào .brain/trash (giữ 90 ngày theo thiết kế, dọn dẹp là việc của janitor).
     pub fn trash_note(&mut self, rel: &str) -> Result<()> {
         let abs = self.abs_path(rel)?;
+        std::fs::rename(&abs, self.trash_target(rel, "note.md")?)?;
+        self.index()?;
+        Ok(())
+    }
+
+    /// Xóa cả folder = chuyển nguyên thư mục vào .brain/trash, giống `trash_note`.
+    pub fn trash_dir(&mut self, rel: &str) -> Result<()> {
+        let rel_norm = rel.trim_matches('/').to_string();
+        if rel_norm.is_empty() {
+            anyhow::bail!("không thể xóa thư mục gốc của vault");
+        }
+        let abs = self.abs_path(&rel_norm)?;
+        if !abs.is_dir() {
+            anyhow::bail!("không phải thư mục: {rel_norm}");
+        }
+        std::fs::rename(&abs, self.trash_target(&rel_norm, "folder")?)?;
+        self.index()?;
+        Ok(())
+    }
+
+    /// Nhân bản note sang tên chưa bị chiếm (`ghi chú` → `ghi chú 1`).
+    /// Trả về path tương đối của bản sao.
+    pub fn duplicate_note(&mut self, rel: &str) -> Result<String> {
+        let src = self.abs_path(rel)?;
+        let rel_norm = rel.replace('\\', "/");
+        let (stem, ext) = match rel_norm.rsplit_once('.') {
+            Some((s, e)) => (s, e),
+            None => (rel_norm.as_str(), "md"),
+        };
+        let mut i = 1;
+        let mut dst_rel = format!("{stem} {i}.{ext}");
+        while self.root.join(&dst_rel).exists() {
+            i += 1;
+            dst_rel = format!("{stem} {i}.{ext}");
+        }
+        std::fs::copy(&src, self.root.join(&dst_rel))?;
+        self.index()?;
+        Ok(dst_rel)
+    }
+
+    /// Chỗ trống trong .brain/trash cho `rel`, tên có timestamp để không đè nhau.
+    fn trash_target(&self, rel: &str, fallback: &str) -> Result<PathBuf> {
         let trash = self.root.join(".brain").join("trash");
         std::fs::create_dir_all(&trash)?;
         let ts = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let name = Path::new(rel).file_name().and_then(|s| s.to_str()).unwrap_or("note.md");
-        std::fs::rename(&abs, trash.join(format!("{ts}-{}", name.replace(['/', '\\'], "_"))))?;
-        self.index()?;
-        Ok(())
+        let name = Path::new(rel).file_name().and_then(|s| s.to_str()).unwrap_or(fallback);
+        Ok(trash.join(format!("{ts}-{}", name.replace(['/', '\\'], "_"))))
     }
 
     fn scan_files(&self) -> Vec<FileMeta> {
@@ -462,6 +502,66 @@ mod tests {
         // Sau rename: không còn broken link, backlink trỏ về path mới.
         assert!(v.db.broken_links().unwrap().is_empty());
         assert_eq!(v.db.backlinks("archive/Beta Renamed.md").unwrap().len(), 3);
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn related_notes_uses_tags_and_cocitation() {
+        let tmp = std::env::temp_dir().join(format!("brain-related-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write(&tmp, "hub.md", "# Hub\nTrung tâm.\n");
+        write(&tmp, "me.md", "---\ntags: [rust, async]\n---\n# Me\nXem [[hub]].\n");
+        // Cùng tag + cùng link tới hub → phải đứng đầu.
+        write(&tmp, "sibling.md", "---\ntags: [rust, async]\n---\n# Sibling\nXem [[hub]].\n");
+        // Không tag, không link → không được xuất hiện.
+        write(&tmp, "stranger.md", "# Stranger\nChuyện khác hẳn.\n");
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+
+        let rel = v.db.related_notes("me.md", 8).unwrap();
+        assert_eq!(rel[0].path, "sibling.md", "got: {rel:?}");
+        assert!(rel[0].reason.contains("tag chung"), "got: {}", rel[0].reason);
+        // hub.md bị loại vì me.md link thẳng tới nó (đã hiện ở panel backlinks).
+        assert!(!rel.iter().any(|r| r.path == "hub.md"), "got: {rel:?}");
+        assert!(!rel.iter().any(|r| r.path == "stranger.md"), "got: {rel:?}");
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn duplicate_and_trash_dir() {
+        let tmp = std::env::temp_dir().join(format!("brain-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write(&tmp, "sub/ghi chú.md", "# Ghi chú\nNội dung.\n");
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+
+        // Nhân bản hai lần → " 1" rồi " 2", không đè lên nhau.
+        assert_eq!(v.duplicate_note("sub/ghi chú.md").unwrap(), "sub/ghi chú 1.md");
+        assert_eq!(v.duplicate_note("sub/ghi chú.md").unwrap(), "sub/ghi chú 2.md");
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("sub/ghi chú 1.md")).unwrap(),
+            "# Ghi chú\nNội dung.\n"
+        );
+        assert_eq!(v.db.note_list().unwrap().len(), 3);
+
+        // Xóa folder → cả 3 note biến khỏi index, file nằm trong .brain/trash.
+        v.trash_dir("sub").unwrap();
+        assert!(!tmp.join("sub").exists());
+        assert_eq!(v.db.note_list().unwrap().len(), 0);
+        let trashed: Vec<_> = std::fs::read_dir(tmp.join(".brain/trash")).unwrap().collect();
+        assert_eq!(trashed.len(), 1);
+
+        // Không cho xóa gốc vault.
+        assert!(v.trash_dir("").is_err());
 
         drop(v);
         let _ = std::fs::remove_dir_all(&tmp);

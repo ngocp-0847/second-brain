@@ -3,7 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
     <title>Second Brain</title>
+    <script>
+      // Đóng dấu theme TRƯỚC khi paint. Nếu để tới lúc JS bundle chạy xong thì
+      // WebView đã kịp vẽ một khung nền trắng mặc định → nháy trắng mỗi lần mở app.
+      // Vì vậy theme pref nằm ở localStorage (đọc đồng bộ) chứ không phải store
+      // của tauri-plugin-store (async).
+      (function () {
+        try {
+          var pref = localStorage.getItem("theme") || "system";
+          var dark =
+            pref === "dark" ||
+            (pref === "system" && !window.matchMedia("(prefers-color-scheme: light)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+    <style>
+      /* Nền sớm cho khung hình đầu tiên, trước khi styles.css kịp load */
+      html[data-theme="dark"] {
+        background: #16181f;
+      }
+      html[data-theme="light"] {
+        background: #f7f8fb;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

@@ -7,6 +7,20 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api } from "./api";
+import { NOTE_DRAG_MIME } from "./dnd";
+import {
+  IconCaret,
+  IconCursor,
+  IconHelp,
+  IconImage,
+  IconLink,
+  IconNoteCard,
+  IconRedo,
+  IconSticky,
+  IconTextCard,
+  IconTrash,
+  IconUndo,
+} from "./icons";
 
 export type ShapeKind =
   | "rect"
@@ -65,7 +79,20 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 /** Số bước undo giữ lại. */
 const HISTORY_MAX = 100;
 
-// Bảng màu preset chuẩn JSON Canvas ("1".."6"), tông hợp dark theme.
+/** Kích thước card cho text dán vào: ước lượng số dòng sau khi wrap ở bề rộng
+ *  cố định rồi kẹp lại, để đoạn dài không sinh ra card cao vô tận. */
+const textCardSize = (text: string): [number, number] => {
+  const w = 320;
+  const perLine = 42; // ký tự/dòng ở 320px với font 14px
+  const lines = text
+    .split("\n")
+    .reduce((n, l) => n + Math.max(1, Math.ceil(l.length / perLine)), 0);
+  return [w, Math.min(420, Math.max(90, lines * 22 + 24))];
+};
+
+// Bảng màu preset chuẩn JSON Canvas ("1".."6"). Đây là màu DỮ LIỆU ghi vào file
+// .canvas nên phải cố định để Obsidian đọc đúng — 6 tông pastel này đủ tương phản
+// trên cả nền tối lẫn nền sáng nên không cần đổi theo theme.
 const PALETTE: Record<string, string> = {
   "1": "#e0876a", // đỏ
   "2": "#e8a06a", // cam
@@ -75,8 +102,11 @@ const PALETTE: Record<string, string> = {
   "6": "#a48fff", // tím
 };
 
-const EDGE_DEFAULT = "#4a5170";
-const EDGE_SELECTED = "#a48fff";
+// Màu edge là màu GIAO DIỆN (không ghi vào file khi edge không có `color` riêng)
+// nên đi qua token. Chuỗi "var(...)" chảy thẳng vào attribute stroke/fill của SVG,
+// và markerId() lọc ký tự lạ nên vẫn sinh ra id hợp lệ.
+const EDGE_DEFAULT = "var(--edge)";
+const EDGE_SELECTED = "var(--accent)";
 
 // ---- shape: vẽ trong hệ toạ độ world của node (viewBox = 0 0 w h) nên stroke không méo ----
 const shapePath = (k: ShapeKind, w: number, h: number): string => {
@@ -206,7 +236,11 @@ function LinkifiedText(props: { text: string; onOpenNote: (path: string) => void
         const inner = m[2];
         const pipe = inner.indexOf("|");
         const target = (pipe >= 0 ? inner.slice(0, pipe) : inner).split("#")[0].trim();
-        out.push({ t: "wiki", target, label: pipe >= 0 ? inner.slice(pipe + 1) : inner });
+        out.push({
+          t: "wiki",
+          target,
+          label: pipe >= 0 ? inner.slice(pipe + 1) : inner,
+        });
       } else if (m[3]) {
         out.push({ t: "url", href: m[5], label: m[4] });
       } else {
@@ -292,7 +326,9 @@ const loadImage = (path: string) => {
 
 function CanvasImage(props: { path: string }) {
   const [src, setSrc] = createSignal<string | null>(null);
-  loadImage(props.path).then(setSrc).catch(() => {});
+  loadImage(props.path)
+    .then(setSrc)
+    .catch(() => {});
   return (
     <Show when={src()} fallback={<div class="canvas-file-hint">đang tải ảnh…</div>}>
       <img class="canvas-img" src={src()!} draggable={false} alt={props.path} />
@@ -300,7 +336,7 @@ function CanvasImage(props: { path: string }) {
   );
 }
 
-const resolveColor = (c?: string) => (c ? PALETTE[c] ?? (c.startsWith("#") ? c : null) : null);
+const resolveColor = (c?: string) => (c ? (PALETTE[c] ?? (c.startsWith("#") ? c : null)) : null);
 const cardColor = (n: CanvasNode) => resolveColor(n.color);
 
 /** Lớp nền SVG của node có shape. Không dùng clip-path vì nó cắt mất card-toolbar + port. */
@@ -308,12 +344,8 @@ function ShapeLayer(props: { node: CanvasNode; tint: string | null }) {
   const kind = () => props.node.shape as ShapeKind;
   const sticky = () => kind() === "sticky";
   const fill = () =>
-    sticky()
-      ? props.tint ?? PALETTE["3"]
-      : props.tint
-        ? `${props.tint}1a`
-        : "var(--bg-panel)";
-  const stroke = () => (sticky() ? "transparent" : props.tint ?? "var(--border-card)");
+    sticky() ? (props.tint ?? PALETTE["3"]) : props.tint ? `${props.tint}1a` : "var(--bg-panel)";
+  const stroke = () => (sticky() ? "transparent" : (props.tint ?? "var(--border-card)"));
   const d = () => shapePath(kind(), props.node.width, props.node.height);
   const detail = () => shapeDetail(kind(), props.node.width, props.node.height);
   return (
@@ -347,7 +379,13 @@ function ShapeLayer(props: { node: CanvasNode; tint: string | null }) {
 
 /** Icon shape trong toolbar — dùng lại chính shapePath() nên luôn khớp với hình thật. */
 const ShapeGlyph = (props: { kind: ShapeKind }) => (
-  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+  <svg
+    viewBox="0 0 20 20"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.6"
+    stroke-linejoin="round"
+  >
     <path
       d={shapePath(props.kind, 16, 16)}
       transform="translate(2,2)"
@@ -357,76 +395,6 @@ const ShapeGlyph = (props: { kind: ShapeKind }) => (
     <Show when={shapeDetail(props.kind, 16, 16)}>
       {(d) => <path d={d()} transform="translate(2,2)" fill="none" />}
     </Show>
-  </svg>
-);
-
-const IconTextCard = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-    <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
-    <path d="M7.5 9.5h9M7.5 13h9M7.5 16.5h5" />
-  </svg>
-);
-
-const IconNoteCard = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M14 3.5H6.5A1.5 1.5 0 0 0 5 5v14a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5L14 3.5Z" />
-    <path d="M14 3.5V8.5H19" />
-  </svg>
-);
-
-const IconImage = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
-    <circle cx="9" cy="10" r="1.6" />
-    <path d="M20 15.5 15.5 11l-7 8" />
-  </svg>
-);
-
-const IconTrash = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-    <path d="M4.5 6.5h15M9.5 6V4.5h5V6M7 6.5l.8 12a1.5 1.5 0 0 0 1.5 1.4h5.4a1.5 1.5 0 0 0 1.5-1.4l.8-12" />
-    <path d="M10 10.5v6M14 10.5v6" />
-  </svg>
-);
-
-const IconCursor = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
-    <path d="M5.5 3.5 18 11.2l-5.4 1.4-2.6 5.2z" />
-  </svg>
-);
-
-const IconSticky = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
-    <path d="M4.5 5.5A1 1 0 0 1 5.5 4.5h13a1 1 0 0 1 1 1v8.5L14 19.5H5.5a1 1 0 0 1-1-1Z" />
-    <path d="M19.5 14H15a1 1 0 0 0-1 1v4.5" />
-  </svg>
-);
-
-const IconCaret = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M7 15.5 12 10l5 5.5" />
-  </svg>
-);
-
-const IconUndo = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M8 7.5H14.5a5 5 0 0 1 0 10H8.5" />
-    <path d="M10.8 4.5 7.5 7.5l3.3 3" />
-  </svg>
-);
-
-const IconRedo = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M16 7.5H9.5a5 5 0 0 0 0 10h6" />
-    <path d="M13.2 4.5 16.5 7.5l-3.3 3" />
-  </svg>
-);
-
-const IconHelp = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="12" cy="12" r="8.5" />
-    <path d="M9.6 9.4a2.5 2.5 0 1 1 3.2 2.5c-.6.2-.9.7-.9 1.3v.5" />
-    <path d="M12 16.7h.01" />
   </svg>
 );
 
@@ -539,75 +507,112 @@ export function CanvasView(props: {
     setOy((host.clientHeight - (maxY - minY) * s) / 2 - minY * s);
   };
 
-  onMount(async () => {
-    try {
-      const raw = await api.readNote(props.path);
-      const parsed = JSON.parse(raw);
-      setDoc({ nodes: parsed.nodes ?? [], edges: parsed.edges ?? [] });
-    } catch {
-      setDoc({ nodes: [], edges: [] });
+  /** Con trỏ đang nằm trong một vùng soạn thảo → phím và paste không thuộc về
+   *  canvas. Phải xét cả `isContentEditable`: vùng gõ của CodeMirror là
+   *  div[contenteditable], không phải textarea, nên chỉ check instanceof là lọt. */
+  const inTextField = () => {
+    const ae = document.activeElement as HTMLElement | null;
+    return (
+      !!ae &&
+      (ae.isContentEditable || ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement)
+    );
+  };
+
+  /** Listener nằm trên `window` nên vẫn nhận event kể cả khi canvas đã rời DOM.
+   *  Chốt chặn độc lập với mọi guard khác. */
+  const isLive = () => !!host?.isConnected;
+
+  const onKey = (e: KeyboardEvent) => {
+    if (!isLive() || inTextField()) return;
+    // Ctrl/Cmd+Z undo · Ctrl+Shift+Z hoặc Ctrl+Y redo.
+    if ((e.ctrlKey || e.metaKey) && /^[zy]$/i.test(e.key)) {
+      if (editing()) return;
+      e.preventDefault();
+      if (e.key.toLowerCase() === "y" || e.shiftKey) redo();
+      else undo();
+      return;
     }
-    fitView();
-    const onKey = (e: KeyboardEvent) => {
-      // Ctrl/Cmd+Z undo · Ctrl+Shift+Z hoặc Ctrl+Y redo. Đang gõ trong ô nhập thì
-      // nhường cho undo mặc định của textarea/input.
-      if ((e.ctrlKey || e.metaKey) && /^[zy]$/i.test(e.key)) {
-        const ae = document.activeElement;
-        if (editing() || ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) return;
-        e.preventDefault();
-        if (e.key.toLowerCase() === "y" || e.shiftKey) redo();
-        else undo();
-        return;
-      }
-      if (e.key === "Escape") {
-        setLinking(null);
-        cancelPlacing();
-        setShapeMenu(false);
-        setHelpOpen(false);
-        setShapePick(null);
-        return;
-      }
-      if (e.key !== "Delete" && e.key !== "Backspace") return;
-      if (editing()) return;
-      if (selectedEdge()) {
-        mutate((d) => ({ ...d, edges: d.edges.filter((x) => x.id !== selectedEdge()) }));
-        setSelectedEdge(null);
-      } else if (selectedCard()) {
-        removeCard(selectedCard()!);
-        setSelectedCard(null);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    // Ctrl+V dán ảnh từ clipboard → lưu vào assets/ của vault rồi thêm card ảnh.
-    const onPaste = async (e: ClipboardEvent) => {
-      if (editing()) return;
-      const ae = document.activeElement;
-      if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) return;
-      const files = e.clipboardData?.files;
-      if (!files?.length) return;
-      for (const f of files) {
-        if (!f.type.startsWith("image/")) continue;
-        e.preventDefault();
-        try {
-          const buf = new Uint8Array(await f.arrayBuffer());
-          let bin = "";
-          for (let i = 0; i < buf.length; i += 0x8000) {
-            bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-          }
-          const ext = (f.type.split("/")[1] ?? "png").replace("jpeg", "jpg").replace("svg+xml", "svg");
-          const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-          const name = f.name && !/^image\.\w+$/i.test(f.name) ? f.name : `Pasted image ${stamp}.${ext}`;
-          await addImageNode(await api.saveAsset(name, btoa(bin)));
-        } catch (err) {
-          console.error("paste ảnh thất bại:", err);
+    if (e.key === "Escape") {
+      setLinking(null);
+      cancelPlacing();
+      setShapeMenu(false);
+      setHelpOpen(false);
+      setShapePick(null);
+      return;
+    }
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    if (editing()) return;
+    if (selectedEdge()) {
+      mutate((d) => ({
+        ...d,
+        edges: d.edges.filter((x) => x.id !== selectedEdge()),
+      }));
+      setSelectedEdge(null);
+    } else if (selectedCard()) {
+      removeCard(selectedCard()!);
+      setSelectedCard(null);
+    }
+  };
+
+  /** Ctrl+V: có file ảnh thì lưu vào assets/ rồi thêm card ảnh; không thì dán
+   *  text thành card, giống Obsidian. */
+  const onPaste = async (e: ClipboardEvent) => {
+    if (!isLive() || inTextField() || editing()) return;
+    const files = e.clipboardData?.files;
+    if (!files?.length) {
+      const text = e.clipboardData?.getData("text/plain")?.replace(/\r\n/g, "\n").trim();
+      if (!text) return;
+      e.preventDefault();
+      const rect = host.getBoundingClientRect();
+      const c = toWorld(rect.left + host.clientWidth / 2, rect.top + host.clientHeight / 2);
+      const [w, h] = textCardSize(text);
+      createNode(null, { x: c.x - w / 2, y: c.y - h / 2, w, h }, text);
+      return;
+    }
+    for (const f of files) {
+      if (!f.type.startsWith("image/")) continue;
+      e.preventDefault();
+      try {
+        const buf = new Uint8Array(await f.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < buf.length; i += 0x8000) {
+          bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
         }
+        const ext = (f.type.split("/")[1] ?? "png")
+          .replace("jpeg", "jpg")
+          .replace("svg+xml", "svg");
+        const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+        const name =
+          f.name && !/^image\.\w+$/i.test(f.name) ? f.name : `Pasted image ${stamp}.${ext}`;
+        await addImageNode(await api.saveAsset(name, btoa(bin)));
+      } catch (err) {
+        console.error("paste ảnh thất bại:", err);
       }
-    };
+    }
+  };
+
+  onMount(() => {
+    // Đăng ký ĐỒNG BỘ. Nếu đặt sau `await` thì Solid đã mất Owner, onCleanup
+    // không bao giờ được ghi nhận và listener sống mãi trên window — chính là
+    // nguyên nhân dán vào note lại bị tạo card trong canvas đã đóng.
+    window.addEventListener("keydown", onKey);
     window.addEventListener("paste", onPaste);
     onCleanup(() => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("paste", onPaste);
+      if (saveTimer) clearTimeout(saveTimer); // đừng ghi đè file sau khi đã rời view
     });
+
+    void (async () => {
+      try {
+        const raw = await api.readNote(props.path);
+        const parsed = JSON.parse(raw);
+        setDoc({ nodes: parsed.nodes ?? [], edges: parsed.edges ?? [] });
+      } catch {
+        setDoc({ nodes: [], edges: [] });
+      }
+      fitView();
+    })();
   });
 
   const toWorld = (clientX: number, clientY: number) => {
@@ -625,7 +630,10 @@ export function CanvasView(props: {
 
   /** Chỗ bấm có phải nền trống không (card/toolbar tự stopPropagation, nhưng plane phủ kín host). */
   const isBackground = (t: EventTarget | null) =>
-    !(t instanceof Element && t.closest(".canvas-card, .canvas-group, .card-toolbar, .canvas-toolbar"));
+    !(
+      t instanceof Element &&
+      t.closest(".canvas-card, .canvas-group, .card-toolbar, .canvas-toolbar")
+    );
 
   const cancelPlacing = () => {
     placeStart = null;
@@ -710,7 +718,12 @@ export function CanvasView(props: {
       const box =
         d && d.w >= 12 && d.h >= 12
           ? d
-          : { x: placeStart.x - dw / 2, y: placeStart.y - dh / 2, w: dw, h: dh };
+          : {
+              x: placeStart.x - dw / 2,
+              y: placeStart.y - dh / 2,
+              w: dw,
+              h: dh,
+            };
       cancelPlacing();
       createNode(kind, box);
       return;
@@ -739,7 +752,13 @@ export function CanvasView(props: {
             ...d,
             edges: [
               ...d.edges,
-              { id: uid(), fromNode: l.fixedNode, toNode: toId, fromSide: l.fixedSide, toSide: side },
+              {
+                id: uid(),
+                fromNode: l.fixedNode,
+                toNode: toId,
+                fromSide: l.fixedSide,
+                toSide: side,
+              },
             ],
           }));
         }
@@ -772,7 +791,7 @@ export function CanvasView(props: {
     }
   };
   /** Tạo node text (kind = null) hoặc node có shape, rồi vào chế độ gõ chữ ngay. */
-  const createNode = (kind: ShapeKind | null, b: Box) => {
+  const createNode = (kind: ShapeKind | null, b: Box, text = "") => {
     const id = uid();
     const node: CanvasNode = {
       id,
@@ -781,13 +800,14 @@ export function CanvasView(props: {
       y: Math.round(b.y),
       width: Math.round(b.w),
       height: Math.round(b.h),
-      text: "",
+      text,
       ...(kind ? { shape: kind } : {}),
       ...(kind === "sticky" ? { color: "3" } : {}), // giấy nhớ mặc định màu vàng
     };
     mutate((d) => ({ ...d, nodes: [...d.nodes, node] }));
     setSelectedCard(id);
-    setEditing(id);
+    // Card rỗng thì vào gõ ngay; card dán sẵn nội dung thì chỉ chọn, khỏi che chữ.
+    if (!text) setEditing(id);
   };
   const newTextCard = (wx: number, wy: number) =>
     createNode(null, { x: wx - 130, y: wy - 45, w: 260, h: 90 });
@@ -828,7 +848,13 @@ export function CanvasView(props: {
     e.stopPropagation();
     e.preventDefault();
     const w = toWorld(e.clientX, e.clientY);
-    setLinking({ fixedNode: n.id, fixedSide: side, movingEnd: "to", x: w.x, y: w.y });
+    setLinking({
+      fixedNode: n.id,
+      fixedSide: side,
+      movingEnd: "to",
+      x: w.x,
+      y: w.y,
+    });
   };
 
   /** Nhấc một đầu của edge đang chọn để nối lại chỗ khác. */
@@ -838,8 +864,22 @@ export function CanvasView(props: {
     const w = toWorld(e.clientX, e.clientY);
     setLinking(
       end === "to"
-        ? { fixedNode: edge.fromNode, fixedSide: edge.fromSide, movingEnd: "to", edgeId: edge.id, x: w.x, y: w.y }
-        : { fixedNode: edge.toNode, fixedSide: edge.toSide, movingEnd: "from", edgeId: edge.id, x: w.x, y: w.y },
+        ? {
+            fixedNode: edge.fromNode,
+            fixedSide: edge.fromSide,
+            movingEnd: "to",
+            edgeId: edge.id,
+            x: w.x,
+            y: w.y,
+          }
+        : {
+            fixedNode: edge.toNode,
+            fixedSide: edge.toSide,
+            movingEnd: "from",
+            edgeId: edge.id,
+            x: w.x,
+            y: w.y,
+          },
     );
   };
 
@@ -868,7 +908,15 @@ export function CanvasView(props: {
       ...d,
       nodes: [
         ...d.nodes,
-        { id, type: "file", x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h, file: rel },
+        {
+          id,
+          type: "file",
+          x: Math.round(c.x - w / 2),
+          y: Math.round(c.y - h / 2),
+          width: w,
+          height: h,
+          file: rel,
+        },
       ],
     }));
     setSelectedCard(id);
@@ -887,18 +935,60 @@ export function CanvasView(props: {
     }
   };
 
+  /** Card trỏ tới note trong vault, tâm đặt tại (wx, wy) trong toạ độ world. */
+  const addNoteNode = (path: string, wx: number, wy: number) => {
+    const id = uid();
+    mutate((d) => ({
+      ...d,
+      nodes: [
+        ...d.nodes,
+        {
+          id,
+          type: "file",
+          x: Math.round(wx) - 150,
+          y: Math.round(wy) - 70,
+          width: 300,
+          height: 140,
+          file: path,
+        },
+      ],
+    }));
+    setSelectedCard(id);
+  };
+
   const addNoteCard = () =>
     props.requestNotePick((path) => {
       const rect = host.getBoundingClientRect();
       const w = toWorld(rect.left + host.clientWidth / 2, rect.top + host.clientHeight / 2);
-      mutate((d) => ({
-        ...d,
-        nodes: [
-          ...d.nodes,
-          { id: uid(), type: "file", x: Math.round(w.x) - 150, y: Math.round(w.y) - 70, width: 300, height: 140, file: path },
-        ],
-      }));
+      addNoteNode(path, w.x, w.y);
     });
+
+  // ---- kéo note từ sidebar thả vào canvas ----
+  const [dropping, setDropping] = createSignal(false);
+  const notePathFrom = (e: DragEvent) =>
+    e.dataTransfer?.types.includes(NOTE_DRAG_MIME) ? e.dataTransfer.getData(NOTE_DRAG_MIME) : null;
+
+  const onDragOver = (e: DragEvent) => {
+    if (!e.dataTransfer?.types.includes(NOTE_DRAG_MIME)) return;
+    // preventDefault ở dragover mới là thứ cho phép thả — thiếu nó trình duyệt
+    // sẽ từ chối drop và không bao giờ bắn sự kiện onDrop.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setDropping(true);
+  };
+  const onDragLeave = (e: DragEvent) => {
+    // dragleave bắn cả khi con trỏ đi qua node con → chỉ tắt khi rời hẳn host.
+    if (e.relatedTarget instanceof Node && host.contains(e.relatedTarget)) return;
+    setDropping(false);
+  };
+  const onDrop = (e: DragEvent) => {
+    const path = notePathFrom(e);
+    setDropping(false);
+    if (!path) return;
+    e.preventDefault();
+    const w = toWorld(e.clientX, e.clientY);
+    addNoteNode(path, w.x, w.y);
+  };
 
   const removeCard = (id: string) =>
     mutate((d) => ({
@@ -1027,7 +1117,7 @@ export function CanvasView(props: {
   ];
 
   const edgeStroke = (e: CanvasEdge) =>
-    selectedEdge() === e.id ? EDGE_SELECTED : resolveColor(e.color) ?? EDGE_DEFAULT;
+    selectedEdge() === e.id ? EDGE_SELECTED : (resolveColor(e.color) ?? EDGE_DEFAULT);
 
   // Mỗi màu edge một <marker> riêng (SVG marker không ăn màu stroke của path).
   const markerColors = createMemo(() => {
@@ -1046,16 +1136,21 @@ export function CanvasView(props: {
     <div
       ref={host}
       class="canvas-host"
-      classList={{ placing: tool().kind !== "select" }}
+      classList={{ placing: tool().kind !== "select", dropping: dropping() }}
       onMouseDown={onBgDown}
       onMouseMove={onMove}
       onMouseUp={onUp}
       onWheel={onWheel}
       onDblClick={onDblClick}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
     >
       <div
         class="canvas-plane"
-        style={{ transform: `translate(${ox()}px, ${oy()}px) scale(${scale()})` }}
+        style={{
+          transform: `translate(${ox()}px, ${oy()}px) scale(${scale()})`,
+        }}
       >
         <svg class="canvas-edges">
           <defs>
@@ -1111,8 +1206,20 @@ export function CanvasView(props: {
               const pts = () => edgeAnchors(e);
               return (
                 <>
-                  <circle class="edge-handle" cx={pts()[0].x} cy={pts()[0].y} r={6} onMouseDown={(ev) => grabEdgeEnd(ev, e, "from")} />
-                  <circle class="edge-handle" cx={pts()[1].x} cy={pts()[1].y} r={6} onMouseDown={(ev) => grabEdgeEnd(ev, e, "to")} />
+                  <circle
+                    class="edge-handle"
+                    cx={pts()[0].x}
+                    cy={pts()[0].y}
+                    r={6}
+                    onMouseDown={(ev) => grabEdgeEnd(ev, e, "from")}
+                  />
+                  <circle
+                    class="edge-handle"
+                    cx={pts()[1].x}
+                    cy={pts()[1].y}
+                    r={6}
+                    onMouseDown={(ev) => grabEdgeEnd(ev, e, "to")}
+                  />
                 </>
               );
             }}
@@ -1166,9 +1273,17 @@ export function CanvasView(props: {
                           />
                         )}
                       </For>
-                      <button class="color-dot none" title="Bỏ màu" onClick={() => setColor(n.id, undefined)} />
+                      <button
+                        class="color-dot none"
+                        title="Bỏ màu"
+                        onClick={() => setColor(n.id, undefined)}
+                      />
                       <span class="card-toolbar-sep" />
-                      <button class="card-toolbar-btn" title="Xóa group (Delete)" onClick={() => removeCard(n.id)}>
+                      <button
+                        class="card-toolbar-btn"
+                        title="Xóa group (Delete)"
+                        onClick={() => removeCard(n.id)}
+                      >
                         <IconTrash />
                       </button>
                     </div>
@@ -1253,14 +1368,16 @@ export function CanvasView(props: {
                 ) : n.type === "file" ? (
                   <div class="canvas-file-body">
                     <div class="canvas-file-name">
-                      📄 {n.file?.replace(/\.md$/i, "")}
+                      <IconNoteCard /> {n.file?.replace(/\.md$/i, "")}
                       {n.subpath ?? ""}
                     </div>
                     <div class="canvas-file-hint">double-click để mở</div>
                   </div>
                 ) : n.type === "link" ? (
                   <div class="canvas-file-body">
-                    <div class="canvas-file-name">🔗 {n.url}</div>
+                    <div class="canvas-file-name">
+                      <IconLink /> {n.url}
+                    </div>
                     <div class="canvas-file-hint">double-click mở trong trình duyệt</div>
                   </div>
                 ) : editing() === n.id ? (
@@ -1311,7 +1428,8 @@ export function CanvasView(props: {
                 onDblClick={(e) => {
                   e.stopPropagation();
                   if (n.type === "text") setEditing(n.id);
-                  else if (n.type === "file" && n.file && !isImagePath(n.file)) props.onOpenNote(n.file);
+                  else if (n.type === "file" && n.file && !isImagePath(n.file))
+                    props.onOpenNote(n.file);
                   else if (n.type === "link" && n.url) window.open(n.url, "_blank");
                 }}
               >
@@ -1329,13 +1447,21 @@ export function CanvasView(props: {
                         />
                       )}
                     </For>
-                    <button class="color-dot none" title="Bỏ màu" onClick={() => setColor(n.id, undefined)} />
+                    <button
+                      class="color-dot none"
+                      title="Bỏ màu"
+                      onClick={() => setColor(n.id, undefined)}
+                    />
                     <Show when={n.type === "text"}>
                       <span class="card-toolbar-sep" />
                       <ShapePicker />
                     </Show>
                     <span class="card-toolbar-sep" />
-                    <button class="card-toolbar-btn" title="Xóa card (Delete)" onClick={() => removeCard(n.id)}>
+                    <button
+                      class="card-toolbar-btn"
+                      title="Xóa card (Delete)"
+                      onClick={() => removeCard(n.id)}
+                    >
                       <IconTrash />
                     </button>
                   </div>
@@ -1343,11 +1469,34 @@ export function CanvasView(props: {
                 <Show when={selectedCard() === n.id && editing() !== n.id}>
                   <Handles />
                 </Show>
-                <div class="canvas-port left" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "left")} />
-                <div class="canvas-port right" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "right")} />
-                <div class="canvas-port top" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "top")} />
-                <div class="canvas-port bottom" title="Kéo để nối" onMouseDown={(e) => startLink(e, n, "bottom")} />
-                <Show when={shaped()} fallback={<div class="canvas-card-body"><Content /></div>}>
+                <div
+                  class="canvas-port left"
+                  title="Kéo để nối"
+                  onMouseDown={(e) => startLink(e, n, "left")}
+                />
+                <div
+                  class="canvas-port right"
+                  title="Kéo để nối"
+                  onMouseDown={(e) => startLink(e, n, "right")}
+                />
+                <div
+                  class="canvas-port top"
+                  title="Kéo để nối"
+                  onMouseDown={(e) => startLink(e, n, "top")}
+                />
+                <div
+                  class="canvas-port bottom"
+                  title="Kéo để nối"
+                  onMouseDown={(e) => startLink(e, n, "bottom")}
+                />
+                <Show
+                  when={shaped()}
+                  fallback={
+                    <div class="canvas-card-body">
+                      <Content />
+                    </div>
+                  }
+                >
                   <ShapeLayer node={n} tint={tint()} />
                   <div class="canvas-shape-body" style={{ padding: SHAPE_INSET[n.shape!] }}>
                     <Content />
@@ -1367,7 +1516,12 @@ export function CanvasView(props: {
             return (
               <svg
                 class="canvas-draft"
-                style={{ left: `${d().x}px`, top: `${d().y}px`, width: `${w()}px`, height: `${h()}px` }}
+                style={{
+                  left: `${d().x}px`,
+                  top: `${d().y}px`,
+                  width: `${w()}px`,
+                  height: `${h()}px`,
+                }}
                 viewBox={`0 0 ${w()} ${h()}`}
                 preserveAspectRatio="none"
               >
@@ -1432,7 +1586,9 @@ export function CanvasView(props: {
         <div class="ct-group">
           <button
             class="ct-btn ct-btn-split"
-            classList={{ active: tool().kind === "shape" && !isShapeTool("sticky") }}
+            classList={{
+              active: tool().kind === "shape" && !isShapeTool("sticky"),
+            }}
             title="Hình khối — chọn loại rồi click/kéo trên canvas"
             onClick={() => {
               setTool({ kind: "shape", shape: lastShape() });

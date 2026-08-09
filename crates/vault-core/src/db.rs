@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 /// Bump khi đổi schema: cache là dữ liệu tái tạo được nên chỉ cần drop & rebuild.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Db {
     pub conn: Connection,
@@ -37,6 +37,14 @@ pub struct BrokenLinkRow {
     pub kind: String,
 }
 
+#[derive(Debug)]
+pub struct RelatedRow {
+    pub path: String,
+    pub title: String,
+    /// Vì sao note này được coi là liên quan ("2 tag chung · trùng từ khóa").
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub chunk_id: i64,
@@ -55,8 +63,9 @@ impl Db {
         let mut conn = connect(db_path)?;
 
         // Schema cũ/hỏng → xóa cả file làm lại (cache tái tạo được từ .md).
-        // Không DROP từng bảng vì chunk_vec là virtual table của sqlite-vec,
-        // vault-core không nạp module đó.
+        // Xóa cả file thay vì DROP từng bảng: file cũ có thể còn bảng của phiên
+        // bản trước (ví dụ virtual table `chunk_vec` của sqlite-vec đã bỏ) mà
+        // connection này không nạp module tương ứng nên không DROP nổi.
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let schema_ok = conn.prepare("SELECT text_hash FROM chunk LIMIT 0").is_ok();
         let has_tables = conn.prepare("SELECT id FROM note LIMIT 0").is_ok();
@@ -375,6 +384,133 @@ impl Db {
         }
     }
 
+    /// Note liên quan với `note_path` — thuần SQL, không cần model.
+    ///
+    /// Cộng điểm từ ba tín hiệu của chính graph vault: tag chung, cùng link tới
+    /// một note (co-citation), cùng được một note nhắc tới. Thêm nhánh dự phòng
+    /// khớp từ khóa trong tiêu đề để note chưa có tag/link vẫn ra kết quả.
+    /// Note đã link trực tiếp bị loại — chúng đã hiện ở panel backlinks.
+    pub fn related_notes(&self, note_path: &str, limit: usize) -> Result<Vec<RelatedRow>> {
+        use std::collections::{HashMap, HashSet};
+
+        let Some(id) = self.note_id(note_path)? else {
+            return Ok(Vec::new());
+        };
+        // note_id → (điểm, các mảnh lý do)
+        let mut acc: HashMap<i64, (f64, Vec<String>)> = HashMap::new();
+
+        // 1. Tag chung — tín hiệu do người dùng tự gắn nên đáng tin nhất.
+        {
+            let mut stmt = self.conn.prepare(
+                r#"SELECT t2.note_id, COUNT(*) FROM tag t1
+                   JOIN tag t2 ON t2.tag = t1.tag AND t2.note_id != t1.note_id
+                   WHERE t1.note_id = ?1 GROUP BY t2.note_id"#,
+            )?;
+            for row in stmt.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+                let (nid, n) = row?;
+                let e = acc.entry(nid).or_default();
+                e.0 += 2.0 * n as f64;
+                e.1.push(format!("{n} tag chung"));
+            }
+        }
+
+        // 2. Cùng link tới một note.
+        {
+            let mut stmt = self.conn.prepare(
+                r#"SELECT l2.src_note, COUNT(DISTINCT l1.target_note) FROM link l1
+                   JOIN link l2 ON l2.target_note = l1.target_note AND l2.src_note != ?1
+                   WHERE l1.src_note = ?1 AND l1.target_note IS NOT NULL
+                   GROUP BY l2.src_note"#,
+            )?;
+            for row in stmt.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+                let (nid, n) = row?;
+                let e = acc.entry(nid).or_default();
+                e.0 += 1.5 * n as f64;
+                e.1.push(format!("cùng link tới {n} note"));
+            }
+        }
+
+        // 3. Cùng được một note nhắc tới.
+        {
+            let mut stmt = self.conn.prepare(
+                r#"SELECT l2.target_note, COUNT(DISTINCT l1.src_note) FROM link l1
+                   JOIN link l2 ON l2.src_note = l1.src_note AND l2.target_note != ?1
+                   WHERE l1.target_note = ?1 AND l2.target_note IS NOT NULL
+                   GROUP BY l2.target_note"#,
+            )?;
+            for row in stmt.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+                let (nid, n) = row?;
+                let e = acc.entry(nid).or_default();
+                e.0 += 1.0 * n as f64;
+                e.1.push(format!("cùng được {n} note nhắc tới"));
+            }
+        }
+
+        // 4. Dự phòng: note nào chứa từ trong tiêu đề (OR, không phải AND như search).
+        if self.fts_enabled {
+            let title: String =
+                self.conn.query_row("SELECT title FROM note WHERE id = ?1", [id], |r| r.get(0))?;
+            let terms: Vec<String> = title
+                .split_whitespace()
+                .filter(|t| t.chars().count() >= 2)
+                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                .collect();
+            if !terms.is_empty() {
+                let mut stmt = self.conn.prepare(
+                    r#"SELECT c.note_id FROM chunk_fts
+                       JOIN chunk c ON c.id = chunk_fts.rowid
+                       WHERE chunk_fts MATCH ?1 AND c.note_id != ?2
+                       ORDER BY rank LIMIT 40"#,
+                )?;
+                let rows = stmt
+                    .query_map(params![terms.join(" OR "), id], |r| r.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut seen = HashSet::new();
+                for (rank, nid) in rows.into_iter().enumerate() {
+                    if !seen.insert(nid) {
+                        continue;
+                    }
+                    let e = acc.entry(nid).or_default();
+                    e.0 += 1.0 / (10.0 + rank as f64);
+                    e.1.push("trùng từ khóa".into());
+                }
+            }
+        }
+
+        // Note đã link trực tiếp (cả hai chiều) → panel backlinks lo rồi.
+        let linked: HashSet<i64> = {
+            let mut stmt = self.conn.prepare(
+                r#"SELECT target_note FROM link WHERE src_note = ?1 AND target_note IS NOT NULL
+                   UNION
+                   SELECT src_note FROM link WHERE target_note = ?1"#,
+            )?;
+            let ids = stmt
+                .query_map([id], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?;
+            ids
+        };
+
+        let mut ranked: Vec<(i64, f64, Vec<String>)> = acc
+            .into_iter()
+            .filter(|(nid, _)| *nid != id && !linked.contains(nid))
+            .map(|(nid, (score, reason))| (nid, score, reason))
+            .collect();
+        // id làm tiebreak để thứ tự ổn định giữa các lần gọi.
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        ranked.truncate(limit);
+
+        let mut stmt = self.conn.prepare("SELECT path, title FROM note WHERE id = ?1")?;
+        let mut out = Vec::with_capacity(ranked.len());
+        for (nid, _, reason) in ranked {
+            if let Ok((path, title)) =
+                stmt.query_row([nid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            {
+                out.push(RelatedRow { path, title, reason: reason.join(" · ") });
+            }
+        }
+        Ok(out)
+    }
+
     /// Chỗ nhắc tới tên note dưới dạng text thuần (chưa link hóa):
     /// tìm cụm từ = tên file của note trong các note chưa link tới nó.
     pub fn unlinked_mentions(&self, note_path: &str, limit: usize) -> Result<Vec<SearchHit>> {
@@ -423,26 +559,13 @@ impl Db {
         Ok(out)
     }
 
-    /// Lấy thông tin note/snippet cho một tập chunk id (phục vụ vector search).
-    pub fn hydrate_chunks(&self, ids: &[i64]) -> Result<Vec<SearchHit>> {
-        let mut out = Vec::with_capacity(ids.len());
-        let mut stmt = self.conn.prepare_cached(
-            r#"SELECT c.id, n.path, n.title, c.heading_path, c.start_line,
-                      substr(c.text, 1, 200)
-               FROM chunk c JOIN note n ON n.id = c.note_id WHERE c.id = ?1"#,
-        )?;
-        for id in ids {
-            if let Ok(hit) = stmt.query_row([id], row_to_hit) {
-                out.push(hit);
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn note_list(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT path, title FROM note ORDER BY path")?;
+    /// (path, title, mtime) — mtime để UI sắp theo "sửa gần đây".
+    pub fn note_list(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, title, mtime FROM note ORDER BY path")?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

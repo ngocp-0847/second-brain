@@ -4,12 +4,9 @@
 mod agent;
 mod git;
 mod history;
-mod semantic_worker;
 mod terminal;
 
-use semantic_worker::{Job, SemanticWorker};
 use serde::Serialize;
-use std::sync::mpsc::channel;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, State};
@@ -18,7 +15,6 @@ use vault_core::Vault;
 #[derive(Default)]
 struct AppState {
     vault: Mutex<Option<Vault>>,
-    worker: Mutex<Option<SemanticWorker>>,
     /// "auto" | "claude" | "codex"
     llm_pref: Mutex<String>,
     /// Revision history (.brain/history.db) — best-effort, lỗi không chặn thao tác note.
@@ -48,6 +44,8 @@ pub(crate) use vault_core::proc::hide_console;
 struct NoteMeta {
     path: String,
     title: String,
+    /// Unix epoch giây — UI dùng để sắp "sửa gần đây".
+    mtime: i64,
 }
 
 #[derive(Serialize)]
@@ -90,28 +88,12 @@ fn with_vault<T>(state: &State<AppState>, f: impl FnOnce(&mut Vault) -> anyhow::
     f(vault).map_err(err)
 }
 
-/// Đẩy job cho worker semantic (bỏ qua nếu worker chưa chạy).
-fn send_job(state: &State<AppState>, job: Job) {
-    if let Ok(guard) = state.worker.lock() {
-        if let Some(w) = guard.as_ref() {
-            let _ = w.tx.send(job);
-        }
-    }
-}
-
-/// Hỏi worker và chờ kết quả tối đa `timeout_ms` (worker bận/lỗi → rỗng, search vẫn chạy BM25).
-fn ask_worker(state: &State<AppState>, make: impl FnOnce(std::sync::mpsc::Sender<Vec<(i64, f64)>>) -> Job, timeout_ms: u64) -> Vec<(i64, f64)> {
-    let (tx, rx) = channel();
-    send_job(state, make(tx));
-    rx.recv_timeout(Duration::from_millis(timeout_ms)).unwrap_or_default()
-}
-
 fn vault_info(vault: &mut Vault, index_ms: u128) -> anyhow::Result<VaultInfo> {
     let notes = vault
         .db
         .note_list()?
         .into_iter()
-        .map(|(path, title)| NoteMeta { path, title })
+        .map(|(path, title, mtime)| NoteMeta { path, title, mtime })
         .collect();
     let (n, l, b, t, c) = vault.db.stats()?;
     let mut dirs = vault.list_dirs();
@@ -125,7 +107,7 @@ fn vault_info(vault: &mut Vault, index_ms: u128) -> anyhow::Result<VaultInfo> {
 }
 
 #[tauri::command]
-fn open_vault(path: String, app: AppHandle, state: State<AppState>) -> CmdResult<VaultInfo> {
+fn open_vault(path: String, state: State<AppState>) -> CmdResult<VaultInfo> {
     // Không có guard này thì Db::open sẽ create_dir_all và âm thầm dựng lại một
     // vault rỗng khi path đã biến mất (folder bị xoá, ổ rời rút ra, drive unmount).
     if !std::path::Path::new(&path).is_dir() {
@@ -134,13 +116,8 @@ fn open_vault(path: String, app: AppHandle, state: State<AppState>) -> CmdResult
     let mut vault = Vault::open(&path).map_err(err)?;
     let stats = vault.index().map_err(err)?;
     let info = vault_info(&mut vault, stats.duration_ms).map_err(err)?;
-    let cache_db = vault.root.join(".brain").join("cache.db");
     *state.history.lock().map_err(err)? = history::History::open(&vault.root.join(".brain")).ok();
     *state.vault.lock().map_err(err)? = Some(vault);
-
-    let worker = SemanticWorker::spawn(cache_db, app);
-    let _ = worker.tx.send(Job::Sync);
-    *state.worker.lock().map_err(err)? = Some(worker);
     Ok(info)
 }
 
@@ -165,20 +142,32 @@ fn read_note(path: String, state: State<AppState>) -> CmdResult<String> {
 }
 
 #[tauri::command]
-fn write_note(path: String, content: String, state: State<AppState>) -> CmdResult<()> {
-    with_vault(&state, |v| {
+/// `with_info` = true thì trả luôn VaultInfo đã index: trước đây editor phải gọi
+/// thêm `refresh()` ngay sau mỗi lần lưu, tức là quét + index toàn vault HAI lần
+/// cho một nhịp gõ. Canvas thì không cần, và vault_info có `list_dirs` (walkdir)
+/// nên bắt nó dựng info mỗi 600ms lúc kéo node là phí.
+fn write_note(
+    path: String,
+    content: String,
+    with_info: Option<bool>,
+    state: State<AppState>,
+) -> CmdResult<Option<VaultInfo>> {
+    let info = with_vault(&state, |v| {
         let abs = v.abs_path(&path)?;
         if let Some(dir) = abs.parent() {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(abs, &content)?;
-        v.index()?;
-        Ok(())
+        let stats = v.index()?;
+        if with_info.unwrap_or(false) {
+            Ok(Some(vault_info(v, stats.duration_ms)?))
+        } else {
+            Ok(None)
+        }
     })?;
     // Bản trước save vào revision theo interval gộp 2 phút (kiểu Obsidian).
     with_history(&state, |h| h.track(&path, &content, false));
-    send_job(&state, Job::Sync);
-    Ok(())
+    Ok(info)
 }
 
 #[tauri::command]
@@ -276,7 +265,6 @@ fn create_folder(path: String, state: State<AppState>) -> CmdResult<String> {
 #[tauri::command]
 fn rename_folder(from: String, to: String, state: State<AppState>) -> CmdResult<()> {
     with_vault(&state, |v| v.rename_dir(&from, &to))?;
-    send_job(&state, Job::Sync);
     Ok(())
 }
 
@@ -289,7 +277,6 @@ fn rename_note(from: String, to: String, state: State<AppState>) -> CmdResult<us
         if t.to_lowercase().ends_with(".md") { t } else { format!("{t}.md") }
     };
     with_history(&state, |h| h.rename(&from, &to_norm));
-    send_job(&state, Job::Sync);
     Ok(n)
 }
 
@@ -306,6 +293,94 @@ fn trash_note(path: String, state: State<AppState>) -> CmdResult<()> {
     with_vault(&state, |v| v.trash_note(&path))
 }
 
+/// Xóa cả folder (vào .brain/trash). Không snapshot từng note bên trong —
+/// thùng rác giữ nguyên cây thư mục nên khôi phục tay được.
+#[tauri::command]
+fn trash_folder(path: String, state: State<AppState>) -> CmdResult<()> {
+    with_vault(&state, |v| v.trash_dir(&path))
+}
+
+/// Nhân bản note, trả về path tương đối của bản sao.
+#[tauri::command]
+fn duplicate_note(path: String, state: State<AppState>) -> CmdResult<String> {
+    with_vault(&state, |v| v.duplicate_note(&path))
+}
+
+/// Đường dẫn tuyệt đối (dạng native, để copy hoặc đưa cho shell).
+/// `path` rỗng → thư mục gốc của vault.
+#[tauri::command]
+fn abs_path(path: String, state: State<AppState>) -> CmdResult<String> {
+    with_vault(&state, |v| {
+        let p = if path.is_empty() { v.root.clone() } else { v.abs_path(&path)? };
+        Ok(p.to_string_lossy().into_owned())
+    })
+}
+
+/// Mở File Explorer và chọn sẵn file. `path` rỗng → mở thư mục vault.
+#[tauri::command]
+fn reveal_in_explorer(path: String, state: State<AppState>) -> CmdResult<()> {
+    let abs = abs_path(path.clone(), state)?;
+    #[cfg(windows)]
+    {
+        // explorer trả exit code khác 0 kể cả khi thành công → không check status.
+        let mut c = vault_core::proc::command("explorer");
+        if path.is_empty() {
+            c.arg(&abs);
+        } else {
+            c.arg(format!("/select,{abs}"));
+        }
+        c.spawn().map_err(err)?;
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = std::path::Path::new(&abs).parent().unwrap_or(std::path::Path::new(&abs));
+        vault_core::proc::command("xdg-open").arg(dir).spawn().map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Mở file bằng app mặc định của hệ điều hành.
+#[tauri::command]
+fn open_external(path: String, state: State<AppState>) -> CmdResult<()> {
+    let abs = abs_path(path, state)?;
+    #[cfg(windows)]
+    // `start` là lệnh nội bộ của cmd nên phải qua `cmd /C`; tham số "" là tiêu đề
+    // cửa sổ — thiếu nó thì start hiểu nhầm đường dẫn có dấu nháy là tiêu đề.
+    vault_core::proc::command("cmd").args(["/C", "start", "", &abs]).spawn().map_err(err)?;
+    #[cfg(not(windows))]
+    vault_core::proc::command("xdg-open").arg(&abs).spawn().map_err(err)?;
+    Ok(())
+}
+
+/// Mở note trong một cửa sổ riêng. Cửa sổ con dùng chung AppState (cùng process)
+/// nên thấy ngay vault đang mở; `?note=` báo cho UI biết chỉ mở đúng note đó.
+#[tauri::command]
+fn open_note_window(path: String, app: AppHandle) -> CmdResult<()> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let title = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".md").to_string();
+    let url = format!("index.html?note={}", urlencode(&path));
+    WebviewWindowBuilder::new(&app, format!("note-{n}"), WebviewUrl::App(url.into()))
+        .title(title)
+        .inner_size(900.0, 700.0)
+        .build()
+        .map_err(err)?;
+    Ok(())
+}
+
+/// Percent-encode đủ dùng cho query string (không kéo thêm dependency).
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// Danh sách revision của một note (mới nhất trước).
 #[tauri::command]
 fn note_history(path: String, state: State<AppState>) -> CmdResult<Vec<history::RevisionMeta>> {
@@ -318,39 +393,27 @@ fn history_get(id: i64, state: State<AppState>) -> CmdResult<String> {
     with_history(&state, |h| h.get(id)).ok_or_else(|| "không tìm thấy revision".to_string())
 }
 
-/// Hybrid search: BM25 + vector, trộn bằng RRF. Vector chưa sẵn sàng → thuần BM25.
+/// Search từ khóa (FTS5/BM25).
 #[tauri::command]
 fn search_notes(query: String, limit: usize, state: State<AppState>) -> CmdResult<Vec<SearchHitDto>> {
-    let vec_hits = ask_worker(&state, |tx| Job::Query { q: query.clone(), k: 30, reply: tx }, 2500);
-    with_vault(&state, |v| {
-        let fts = v.db.search(&query, 30)?;
-        let merged = semantic::rrf_merge(fts, vec_hits, |ids| v.db.hydrate_chunks(ids), limit)?;
-        Ok(merged.into_iter().map(|(h, _)| hit_dto(h)).collect())
-    })
+    with_vault(&state, |v| Ok(v.db.search(&query, limit)?.into_iter().map(hit_dto).collect()))
 }
 
 #[derive(Serialize)]
 struct RelatedDto {
     path: String,
     title: String,
-    heading_path: String,
+    reason: String,
 }
 
-/// Note liên quan theo ngữ nghĩa với note đang mở (gom theo note, bỏ trùng).
+/// Note liên quan với note đang mở (tag chung / đồng trích dẫn / trùng từ khóa).
 #[tauri::command]
 fn related_notes(path: String, state: State<AppState>) -> CmdResult<Vec<RelatedDto>> {
-    let note_id = with_vault(&state, |v| {
-        v.db.note_id(&path)?.ok_or_else(|| anyhow::anyhow!("không tìm thấy note"))
-    })?;
-    let vec_hits = ask_worker(&state, |tx| Job::Related { note_id, k: 24, reply: tx }, 2500);
     with_vault(&state, |v| {
-        let hits = v.db.hydrate_chunks(&vec_hits.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
-        let mut seen = std::collections::HashSet::new();
-        Ok(hits
+        Ok(v.db
+            .related_notes(&path, 8)?
             .into_iter()
-            .filter(|h| h.path != path && seen.insert(h.path.clone()))
-            .take(8)
-            .map(|h| RelatedDto { path: h.path, title: h.title, heading_path: h.heading_path })
+            .map(|r| RelatedDto { path: r.path, title: r.title, reason: r.reason })
             .collect())
     })
 }
@@ -414,10 +477,8 @@ fn ask_vault(question: String, state: State<AppState>) -> CmdResult<AnswerDto> {
     let provider = qa::provider_from_pref(&pref)
         .ok_or("không tìm thấy Claude Code CLI hoặc Codex CLI trên PATH (kiểm tra Settings ⚙)")?;
 
-    let vec_hits = ask_worker(&state, |tx| Job::Query { q: question.clone(), k: 16, reply: tx }, 2500);
     let variants = qa::expand_query(provider, &question);
-
-    let sources = with_vault(&state, |v| qa::retrieve(&v.db, &question, &variants, vec_hits, 6))?;
+    let sources = with_vault(&state, |v| qa::retrieve(&v.db, &question, &variants, 6))?;
     if sources.is_empty() {
         return Ok(AnswerDto {
             answer: "Vault chưa có nội dung nào liên quan để trả lời câu hỏi này.".into(),
@@ -520,27 +581,20 @@ fn term_kill(id: u32, term: State<terminal::TermState>) -> CmdResult<()> {
 #[tauri::command(async)]
 fn janitor_run(app: AppHandle, state: State<AppState>) -> CmdResult<janitor::Report> {
     let report = with_vault(&state, |v| janitor::run(v))?;
-    send_job(&state, Job::Sync);
     let pref = state.llm_pref.lock().map_err(err)?.clone();
     let root = with_vault(&state, |v| Ok(v.root.clone()))?;
     spawn_janitor_tier2(app, root, pref);
     Ok(report)
 }
 
-/// Tầng 2 (LLM restructure + MOC) chạy nền với Vault connection riêng —
+/// Tầng 2 (LLM sinh MOC) chạy nền với Vault connection riêng —
 /// không giữ lock của app trong lúc chờ agent CLI (có thể cả phút).
 fn spawn_janitor_tier2(app: AppHandle, root: std::path::PathBuf, pref: String) {
     use tauri::Emitter;
     let Some(provider) = qa::provider_from_pref(&pref) else { return };
     std::thread::spawn(move || {
         let Ok(mut vault) = Vault::open(&root) else { return };
-        let Ok(sem) = semantic::SemanticIndex::open(&root.join(".brain").join("cache.db")) else {
-            return;
-        };
-        if sem.vector_count().unwrap_or(0) == 0 {
-            return;
-        }
-        if let Ok(rows) = janitor::append_semantic(&mut vault, provider, &sem) {
+        if let Ok(rows) = janitor::append_tier2(&mut vault, provider) {
             if !rows.is_empty() {
                 if let Ok(Some(r)) = janitor::latest_report(&vault) {
                     let _ = app.emit("janitor-report-ready", &r);
@@ -558,7 +612,6 @@ fn janitor_latest(state: State<AppState>) -> CmdResult<Option<janitor::Report>> 
 #[tauri::command]
 fn janitor_apply(action_id: i64, state: State<AppState>) -> CmdResult<String> {
     let msg = with_vault(&state, |v| janitor::apply_action(v, action_id))?;
-    send_job(&state, Job::Sync);
     Ok(msg)
 }
 
@@ -719,6 +772,12 @@ pub fn run() {
             rename_folder,
             rename_note,
             trash_note,
+            trash_folder,
+            duplicate_note,
+            abs_path,
+            reveal_in_explorer,
+            open_external,
+            open_note_window,
             search_notes,
             backlinks,
             resolve_link,
