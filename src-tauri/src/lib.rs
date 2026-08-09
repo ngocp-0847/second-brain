@@ -293,6 +293,39 @@ fn trash_note(path: String, state: State<AppState>) -> CmdResult<()> {
     with_vault(&state, |v| v.trash_note(&path))
 }
 
+/// Đổi tên / di chuyển file KHÔNG phải note (canvas…). Chỉ move trên đĩa: các
+/// file này không nằm trong link graph nên không có wikilink nào để rewrite.
+/// Tự giữ lại đuôi gốc nếu tên mới thiếu. Trả về path tương đối mới.
+#[tauri::command]
+fn rename_file(from: String, to: String, state: State<AppState>) -> CmdResult<String> {
+    let to_norm = with_vault(&state, |v| {
+        let from_abs = v.abs_path(&from)?;
+        let ext = std::path::Path::new(&from)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut to_norm = to.trim().replace('\\', "/");
+        if !ext.is_empty() && !to_norm.to_lowercase().ends_with(&format!(".{}", ext.to_lowercase()))
+        {
+            to_norm = format!("{to_norm}.{ext}");
+        }
+        let to_abs = v.abs_path(&to_norm)?;
+        if to_abs.exists() {
+            anyhow::bail!("đích đã tồn tại: {to_norm}");
+        }
+        if let Some(dir) = to_abs.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::rename(&from_abs, &to_abs)?;
+        v.index()?;
+        Ok(to_norm)
+    })?;
+    // Canvas cũng được ghi qua write_note nên có revision — mang theo path mới.
+    with_history(&state, |h| h.rename(&from, &to_norm));
+    Ok(to_norm)
+}
+
 /// Xóa cả folder (vào .brain/trash). Không snapshot từng note bên trong —
 /// thùng rác giữ nguyên cây thư mục nên khôi phục tay được.
 #[tauri::command]
@@ -352,14 +385,21 @@ fn open_external(path: String, state: State<AppState>) -> CmdResult<()> {
     Ok(())
 }
 
-/// Mở note trong một cửa sổ riêng. Cửa sổ con dùng chung AppState (cùng process)
-/// nên thấy ngay vault đang mở; `?note=` báo cho UI biết chỉ mở đúng note đó.
+/// Mở note (hoặc canvas) trong một cửa sổ riêng. Cửa sổ con dùng chung AppState
+/// (cùng process) nên thấy ngay vault đang mở; `?note=` báo cho UI biết chỉ mở
+/// đúng file đó.
 #[tauri::command]
 fn open_note_window(path: String, app: AppHandle) -> CmdResult<()> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let title = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".md").to_string();
+    let title = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&path)
+        .trim_end_matches(".md")
+        .trim_end_matches(".canvas")
+        .to_string();
     let url = format!("index.html?note={}", urlencode(&path));
     WebviewWindowBuilder::new(&app, format!("note-{n}"), WebviewUrl::App(url.into()))
         .title(title)
@@ -773,6 +813,7 @@ pub fn run() {
             rename_note,
             trash_note,
             trash_folder,
+            rename_file,
             duplicate_note,
             abs_path,
             reveal_in_explorer,

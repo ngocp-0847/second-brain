@@ -314,9 +314,9 @@ export default function App() {
       setBookmarks(getBookmarks(info.root));
       setCanvases(await api.listCanvases().catch(() => []));
       if (SOLO_NOTE) {
-        // Cửa sổ note rời: chỉ mở đúng note được yêu cầu, không đụng tới bộ tab
+        // Cửa sổ rời: chỉ mở đúng file được yêu cầu, không đụng tới bộ tab
         // đã lưu của cửa sổ chính.
-        await openNote(SOLO_NOTE);
+        await openByPath(SOLO_NOTE);
       } else {
         // Mỗi vault nhớ bộ tab riêng; chưa có gì đã lưu thì về tab trống.
         await restoreWorkspace(info.root);
@@ -811,7 +811,7 @@ export default function App() {
   const trashNoteAt = (path: string) => {
     askConfirm(
       {
-        title: "Xóa file",
+        title: isCanvas(path) ? "Xóa canvas" : "Xóa file",
         message: `Bạn có chắc muốn xóa "${path.split("/").pop()}"?`,
         detail: "File sẽ được chuyển vào thùng rác của vault (.brain/trash).",
         confirmLabel: "Xóa",
@@ -821,8 +821,14 @@ export default function App() {
           await api.trashNote(path);
           retargetTabs(path, null);
           void dropBookmark(path);
-          // Chỉ dọn editor khi xóa đúng note đang mở; xóa note khác thì giữ nguyên.
-          if (current() === path) {
+          if (isCanvas(path)) {
+            setCanvases(await api.listCanvases().catch(() => []));
+            if (canvasPath() === path) {
+              setCanvasPath(null);
+              setView("editor");
+            }
+          } else if (current() === path) {
+            // Chỉ dọn editor khi xóa đúng note đang mở; xóa note khác giữ nguyên.
             currentPath = null;
             setCurrent(null);
             editor.setContent("");
@@ -908,6 +914,19 @@ export default function App() {
   /** Tên hiển thị của một path: bỏ thư mục và đuôi .md/.canvas. */
   const fileLabel = (p: string) => p.split("/").pop()!.replace(/\.(md|canvas)$/i, "");
 
+  const isCanvas = (p: string) => /\.canvas$/i.test(p);
+
+  /** Mở đúng loại view theo đuôi file (bookmark, cửa sổ rời, sau khi move…). */
+  const openByPath = async (p: string) => (isCanvas(p) ? openCanvas(p) : await openNote(p));
+
+  const openInNewTab = async (p: string) => {
+    if (!isCanvas(p)) return openNoteInNewTab(p);
+    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    setTabs((ts) => [...ts, t]);
+    setActiveId(t.id);
+    openCanvas(p);
+  };
+
   const copyText = async (text: string, what: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -959,25 +978,35 @@ export default function App() {
     },
   ];
 
-  /** Di chuyển note sang folder khác — `renameNote` lo việc rewrite wikilink. */
-  const moveNoteTo = (path: string) => {
+  /** Di chuyển sang folder khác. Note đi qua `renameNote` để wikilink được
+   *  rewrite; canvas không nằm trong link graph nên dùng `renameFile`. */
+  const moveFileTo = (path: string) => {
     setFolderQuery("");
     setFolderPick({
       title: `Di chuyển "${fileLabel(path)}" tới…`,
       onOk: async (dir) => {
-        const to = dir ? `${dir}/${path.split("/").pop()}` : path.split("/").pop()!;
+        const name = path.split("/").pop()!;
+        const to = dir ? `${dir}/${name}` : name;
         if (to === path) return;
         try {
           editor.flush();
-          const n = await api.renameNote(path, to);
-          applyInfo(await api.refresh());
-          retargetTabs(path, to);
-          void retargetBookmark(path, to);
-          if (current() === path) {
-            currentPath = null;
-            await openNote(to);
+          if (isCanvas(path)) {
+            await api.renameFile(path, to);
+            setCanvases(await api.listCanvases().catch(() => []));
+            retargetTabs(path, to);
+            if (canvasPath() === path) openCanvas(to);
+            say("Đã di chuyển canvas");
+          } else {
+            const n = await api.renameNote(path, to);
+            applyInfo(await api.refresh());
+            retargetTabs(path, to);
+            if (current() === path) {
+              currentPath = null;
+              await openNote(to);
+            }
+            say(`Đã di chuyển, rewrite ${n} link trỏ tới`);
           }
-          say(`Đã di chuyển, rewrite ${n} link trỏ tới`);
+          void retargetBookmark(path, to);
         } catch (e) {
           say(String(e));
         }
@@ -985,27 +1014,57 @@ export default function App() {
     });
   };
 
-  const duplicateNote = async (path: string) => {
+  /** Đổi tên tại chỗ (giữ nguyên folder). Note dùng ô inline trong tree; canvas
+   *  không nằm trong tree nên hỏi qua modal. */
+  const renameFileAt = (path: string) => {
+    if (!isCanvas(path)) return setTreeEditing({ path, kind: "note" });
+    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    setPromptCfg({
+      title: "Tên mới cho canvas",
+      value: fileLabel(path),
+      onOk: async (v) => {
+        const clean = v.trim().replace(/[\\/]/g, "");
+        if (!clean || clean === fileLabel(path)) return;
+        try {
+          const to = await api.renameFile(path, `${dir}${clean}`);
+          setCanvases(await api.listCanvases().catch(() => []));
+          retargetTabs(path, to);
+          void retargetBookmark(path, to);
+          if (canvasPath() === path) openCanvas(to);
+        } catch (e) {
+          say(String(e));
+        }
+      },
+    });
+  };
+
+  const duplicateFile = async (path: string) => {
     try {
       const rel = await api.duplicateNote(path);
-      applyInfo(await api.refresh());
-      await openNote(rel);
+      if (isCanvas(path)) {
+        setCanvases(await api.listCanvases().catch(() => []));
+        openCanvas(rel);
+      } else {
+        applyInfo(await api.refresh());
+        await openNote(rel);
+      }
       say(`Đã tạo bản sao: ${rel}`);
     } catch (e) {
       say(String(e));
     }
   };
 
-  const noteMenu = (path: string): MenuItem[] => [
-    { label: "Mở trong tab mới", icon: IconOpenNewTab, onSelect: () => void openNoteInNewTab(path) },
+  /** Menu cho một file trong vault — dùng chung cho note và canvas. */
+  const fileMenu = (path: string): MenuItem[] => [
+    { label: "Mở trong tab mới", icon: IconOpenNewTab, onSelect: () => void openInNewTab(path) },
     {
       label: "Mở trong cửa sổ mới",
       icon: IconNewWindow,
       onSelect: () => void api.openNoteWindow(path).catch((e) => say(String(e))),
     },
     { separator: true, label: "" },
-    { label: "Nhân bản", icon: IconDuplicate, onSelect: () => void duplicateNote(path) },
-    { label: "Di chuyển tới…", icon: IconMove, onSelect: () => moveNoteTo(path) },
+    { label: "Nhân bản", icon: IconDuplicate, onSelect: () => void duplicateFile(path) },
+    { label: "Di chuyển tới…", icon: IconMove, onSelect: () => moveFileTo(path) },
     isBookmarked(path)
       ? { label: "Bỏ bookmark", icon: IconUnbookmark, onSelect: () => void dropBookmark(path) }
       : { label: "Bookmark…", icon: IconBookmark, onSelect: () => addBookmark(path) },
@@ -1019,11 +1078,7 @@ export default function App() {
     { separator: true, label: "" },
     ...osItems(path),
     { separator: true, label: "" },
-    {
-      label: "Đổi tên…",
-      icon: IconRename,
-      onSelect: () => setTreeEditing({ path, kind: "note" }),
-    },
+    { label: "Đổi tên…", icon: IconRename, onSelect: () => renameFileAt(path) },
     { label: "Xóa", icon: IconTrash, danger: true, onSelect: () => trashNoteAt(path) },
   ];
 
@@ -1052,9 +1107,6 @@ export default function App() {
       onSelect: () => void api.revealInExplorer("").catch((e) => say(String(e))),
     },
   ];
-
-  /** Canvas chưa qua index nên chỉ mở các thao tác không đụng tới path trong DB. */
-  const canvasMenu = (path: string): MenuItem[] => [copyPathItem(path), ...osItems(path)];
 
   const openCtx = (e: MouseEvent, items: MenuItem[]) =>
     setCtxMenu({ x: e.clientX, y: e.clientY, items });
@@ -1548,12 +1600,12 @@ export default function App() {
                         class="tree-file"
                         classList={{ active: current() === b.path }}
                         onClick={(e) =>
-                          e.ctrlKey ? openNoteInNewTab(b.path) : openNote(b.path)
+                          e.ctrlKey ? void openInNewTab(b.path) : void openByPath(b.path)
                         }
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          openCtx(e, noteMenu(b.path));
+                          openCtx(e, fileMenu(b.path));
                         }}
                         title={b.path}
                       >
@@ -1575,7 +1627,7 @@ export default function App() {
               onOpenNewTab={openNoteInNewTab}
               onRename={finishTreeRename}
               onToggleDir={toggleDir}
-              onContextNote={(e, p) => openCtx(e, noteMenu(p))}
+              onContextNote={(e, p) => openCtx(e, fileMenu(p))}
               onContextDir={(e, p) => openCtx(e, dirMenu(p))}
               onContextRoot={(e) => openCtx(e, rootMenu())}
             />
@@ -1586,11 +1638,12 @@ export default function App() {
                   <div
                     class="tree-file canvas-item"
                     classList={{ active: view() === "canvas" && canvasPath() === c }}
-                    onClick={() => openCanvas(c)}
+                    onClick={(e) => (e.ctrlKey ? void openInNewTab(c) : openCanvas(c))}
+                    onAuxClick={(e) => e.button === 1 && void openInNewTab(c)}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      openCtx(e, canvasMenu(c));
+                      openCtx(e, fileMenu(c));
                     }}
                   >
                     {c.replace(/\.canvas$/i, "")}

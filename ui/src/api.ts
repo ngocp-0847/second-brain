@@ -62,6 +62,8 @@ export const api = {
   trashNote: (path: string) => invoke<void>("trash_note", { path }),
   trashFolder: (path: string) => invoke<void>("trash_folder", { path }),
   duplicateNote: (path: string) => invoke<string>("duplicate_note", { path }),
+  /** Đổi tên/di chuyển file không phải note (canvas…). Trả path mới. */
+  renameFile: (from: string, to: string) => invoke<string>("rename_file", { from, to }),
   /** Đường dẫn tuyệt đối dạng native; path rỗng = thư mục gốc vault. */
   absPath: (path: string) => invoke<string>("abs_path", { path }),
   revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
