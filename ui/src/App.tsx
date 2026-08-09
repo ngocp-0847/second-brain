@@ -31,6 +31,7 @@ import {
   IconAi,
   IconAllClear,
   IconAsk,
+  IconBack,
   IconBookmark,
   IconBullets,
   IconCanvas,
@@ -40,6 +41,7 @@ import {
   IconDark,
   IconDirArrow,
   IconDuplicate,
+  IconForward,
   IconGraph,
   IconHistory,
   IconJanitor,
@@ -53,6 +55,7 @@ import {
   IconOpenNewTab,
   IconPanelClose,
   IconPanelOpen,
+  IconPin,
   IconReindex,
   IconRename,
   IconRestore,
@@ -68,6 +71,7 @@ import {
   IconTerminal,
   IconTranslate,
   IconTrash,
+  IconTree,
   IconUnbookmark,
   IconVault,
 } from "./icons";
@@ -120,12 +124,26 @@ const fmtAgo = (epochSec: number) => {
   return out;
 };
 
+/** Một chặng trong lịch sử điều hướng của tab (đủ để dựng lại nội dung tab). */
+interface Loc {
+  kind: "empty" | "note" | "graph" | "canvas";
+  path: string | null;
+}
+
+/** Số chặng lịch sử giữ lại mỗi tab. */
+const HIST_MAX = 50;
+
 /** Một tab của khu vực chính: note, graph, canvas hoặc trống ("New tab"). */
 interface TabState {
   id: number;
   kind: "empty" | "note" | "graph" | "canvas";
   /** note: path .md · canvas: path .canvas · graph: giữ path cũ để toggle quay lại. */
   path: string | null;
+  /** Tab ghim: không bị "đóng các tab khác"/"đóng tất cả" cuốn theo. */
+  pinned?: boolean;
+  /** Lịch sử của RIÊNG tab này, kiểu trình duyệt. `hi` là vị trí hiện tại. */
+  hist: Loc[];
+  hi: number;
 }
 
 export default function App() {
@@ -159,9 +177,20 @@ export default function App() {
   const [canvases, setCanvases] = createSignal<string[]>([]);
 
   // Tabs: mở nhiều note/graph/canvas song song, mỗi tab một trạng thái riêng.
-  const [tabs, setTabs] = createSignal<TabState[]>([{ id: 1, kind: "empty", path: null }]);
+  const [tabs, setTabs] = createSignal<TabState[]>([
+    { id: 1, kind: "empty", path: null, hist: [{ kind: "empty", path: null }], hi: 0 },
+  ]);
   const [activeId, setActiveId] = createSignal(1);
   let nextTabId = 2;
+
+  /** Tab trống mới, đã seed sẵn một chặng lịch sử. */
+  const blankTab = (): TabState => ({
+    id: nextTabId++,
+    kind: "empty",
+    path: null,
+    hist: [{ kind: "empty", path: null }],
+    hi: 0,
+  });
 
   // Folder bị thu gọn trong tree + modal chuyển vault (🗂).
   const [closedDirs, setClosedDirs] = createSignal<Set<string>>(new Set());
@@ -265,6 +294,9 @@ export default function App() {
       await api.renameNote(from, to);
       applyInfo(await api.refresh());
       retargetTabs(from, to);
+      // Người dùng có thể đã Back/Forward hoặc đổi tab trong lúc chờ rename —
+      // đừng kéo họ về note cũ.
+      if (currentPath !== from) return;
       currentPath = to;
       setCurrent(to);
       loadPanels(to);
@@ -383,7 +415,7 @@ export default function App() {
   /** Vault chưa có workspace đã lưu: một tab trống, bung lại toàn bộ folder. */
   const resetWorkspace = () => {
     const id = nextTabId++;
-    setTabs([{ id, kind: "empty", path: null }]);
+    setTabs([{ id, kind: "empty", path: null, hist: [{ kind: "empty", path: null }], hi: 0 }]);
     setActiveId(id);
     setClosedDirs(new Set<string>());
     currentPath = null;
@@ -416,8 +448,14 @@ export default function App() {
         resetWorkspace();
         return;
       }
-      // id là số runtime, không lưu xuống đĩa — cấp lại từ đầu.
-      const restored: TabState[] = alive.map((t) => ({ id: nextTabId++, ...t }));
+      // id là số runtime, không lưu xuống đĩa — cấp lại từ đầu. Lịch sử điều hướng
+      // không persist (giống trình duyệt mở lại): mỗi tab bắt đầu từ đúng chặng của nó.
+      const restored: TabState[] = alive.map((t) => ({
+        id: nextTabId++,
+        ...t,
+        hist: [{ kind: t.kind, path: t.path }],
+        hi: 0,
+      }));
       const idx = Math.min(Math.max(ws.activeIndex, 0), restored.length - 1);
       setTabs(restored);
       setActiveId(restored[idx].id);
@@ -457,6 +495,7 @@ export default function App() {
       editor.setContent(content);
       loadPanels(path);
       updateTab(activeId(), { kind: "note", path });
+      pushHist({ kind: "note", path });
     } catch (e) {
       say(String(e));
     }
@@ -469,6 +508,7 @@ export default function App() {
     setCanvasPath(path);
     setView("canvas");
     updateTab(activeId(), { kind: "canvas", path });
+    pushHist({ kind: "canvas", path });
   };
 
   /** Đồng bộ khu vực chính (editor/graph/canvas) theo nội dung một tab. */
@@ -500,6 +540,69 @@ export default function App() {
     }
   };
 
+  // ---- lịch sử điều hướng của từng tab (kiểu trình duyệt) ----
+
+  /** Bật khi đang đi Back/Forward: chặng đó đã có sẵn, đừng đẩy lại vào lịch sử. */
+  let navigating = false;
+
+  /** Ghi một chặng mới cho tab đang mở, cắt bỏ nhánh "forward" như trình duyệt. */
+  const pushHist = (loc: Loc) => {
+    if (navigating) return;
+    setTabs((ts) =>
+      ts.map((t) => {
+        if (t.id !== activeId()) return t;
+        const cur = t.hist[t.hi];
+        if (cur && cur.kind === loc.kind && cur.path === loc.path) return t;
+        const hist = [...t.hist.slice(0, t.hi + 1), loc].slice(-HIST_MAX);
+        return { ...t, hist, hi: hist.length - 1 };
+      }),
+    );
+  };
+
+  const canBack = () => (activeTab()?.hi ?? 0) > 0;
+  const canForward = () => {
+    const t = activeTab();
+    return !!t && t.hi < t.hist.length - 1;
+  };
+
+  const go = async (delta: number) => {
+    const t = activeTab();
+    if (!t) return;
+    const next = t.hi + delta;
+    if (next < 0 || next >= t.hist.length) return;
+    const loc = t.hist[next];
+    if (currentPath) editor.flush();
+    navigating = true;
+    try {
+      // Phải ghi cả kind/path chứ không riêng hi: tab state và khung nhìn mà lệch
+      // nhau thì lần switchTab sau sẽ dựng lại đúng nội dung CŨ.
+      updateTab(t.id, { ...loc, hi: next });
+      await applyTab({ ...t, ...loc, hi: next });
+    } finally {
+      navigating = false;
+    }
+  };
+
+  // ---- đóng tab hàng loạt ----
+
+  /** Tab ghim được giữ lại; đóng hết mà không còn gì thì mở một tab trống. */
+  const closeMany = async (keep: (t: TabState) => boolean) => {
+    if (currentPath) editor.flush();
+    let rest = tabs().filter((t) => t.pinned || keep(t));
+    if (!rest.length) rest = [blankTab()];
+    setTabs(rest);
+    if (!rest.some((t) => t.id === activeId())) {
+      setActiveId(rest[0].id);
+      await applyTab(rest[0]);
+    }
+  };
+
+  const closeOtherTabs = (id: number) => closeMany((t) => t.id === id);
+  const closeAllTabs = () => closeMany(() => false);
+
+  const togglePin = (id: number) =>
+    setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t)));
+
   const switchTab = async (id: number) => {
     if (id === activeId()) return;
     const t = tabs().find((x) => x.id === id);
@@ -511,7 +614,7 @@ export default function App() {
 
   const newTab = () => {
     if (currentPath) editor.flush();
-    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    const t = blankTab();
     setTabs((ts) => [...ts, t]);
     setActiveId(t.id);
     currentPath = null;
@@ -521,7 +624,7 @@ export default function App() {
   };
 
   const openNoteInNewTab = async (path: string) => {
-    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    const t = blankTab();
     setTabs((ts) => [...ts, t]);
     setActiveId(t.id);
     await openNote(path);
@@ -534,7 +637,7 @@ export default function App() {
     const wasActive = id === activeId();
     if (wasActive && currentPath) editor.flush();
     let rest = ts.filter((t) => t.id !== id);
-    if (rest.length === 0) rest = [{ id: nextTabId++, kind: "empty", path: null }];
+    if (rest.length === 0) rest = [blankTab()];
     setTabs(rest);
     if (wasActive) {
       const next = rest[Math.min(idx, rest.length - 1)];
@@ -552,6 +655,7 @@ export default function App() {
       setCurrent(null);
       setView("graph");
       updateTab(t.id, { kind: "graph" });
+      pushHist({ kind: "graph", path: t.path });
     } else {
       const kind = !t.path
         ? "empty"
@@ -921,7 +1025,7 @@ export default function App() {
 
   const openInNewTab = async (p: string) => {
     if (!isCanvas(p)) return openNoteInNewTab(p);
-    const t: TabState = { id: nextTabId++, kind: "empty", path: null };
+    const t = blankTab();
     setTabs((ts) => [...ts, t]);
     setActiveId(t.id);
     openCanvas(p);
@@ -1054,15 +1158,8 @@ export default function App() {
     }
   };
 
-  /** Menu cho một file trong vault — dùng chung cho note và canvas. */
-  const fileMenu = (path: string): MenuItem[] => [
-    { label: "Mở trong tab mới", icon: IconOpenNewTab, onSelect: () => void openInNewTab(path) },
-    {
-      label: "Mở trong cửa sổ mới",
-      icon: IconNewWindow,
-      onSelect: () => void api.openNoteWindow(path).catch((e) => say(String(e))),
-    },
-    { separator: true, label: "" },
+  /** Phần thao tác trên FILE của menu — dùng chung cho sidebar và cho tab. */
+  const fileActions = (path: string): MenuItem[] => [
     { label: "Nhân bản", icon: IconDuplicate, onSelect: () => void duplicateFile(path) },
     { label: "Di chuyển tới…", icon: IconMove, onSelect: () => moveFileTo(path) },
     isBookmarked(path)
@@ -1081,6 +1178,63 @@ export default function App() {
     { label: "Đổi tên…", icon: IconRename, onSelect: () => renameFileAt(path) },
     { label: "Xóa", icon: IconTrash, danger: true, onSelect: () => trashNoteAt(path) },
   ];
+
+  /** Menu cho một file trong vault — dùng chung cho note và canvas trong sidebar. */
+  const fileMenu = (path: string): MenuItem[] => [
+    { label: "Mở trong tab mới", icon: IconOpenNewTab, onSelect: () => void openInNewTab(path) },
+    {
+      label: "Mở trong cửa sổ mới",
+      icon: IconNewWindow,
+      onSelect: () => void api.openNoteWindow(path).catch((e) => say(String(e))),
+    },
+    { separator: true, label: "" },
+    ...fileActions(path),
+  ];
+
+  /** Bung mọi folder cha rồi cuộn tới note trong sidebar ("Reveal file in navigation"). */
+  const revealInTree = (path: string) => {
+    const parts = path.split("/").slice(0, -1);
+    const ancestors = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+    setClosedDirs((s) => {
+      const next = new Set(s);
+      for (const a of ancestors) next.delete(a);
+      return next;
+    });
+    // Đợi <details> mở xong rồi mới cuộn, nếu không phần tử còn đang ẩn.
+    setTimeout(() => {
+      document
+        .querySelector(`.tree-file[data-path="${CSS.escape(path)}"]`)
+        ?.scrollIntoView({ block: "center" });
+    }, 0);
+  };
+
+  /** Menu chuột phải trên một TAB: nhóm đóng/ghim, rồi thao tác file nếu tab có file. */
+  const tabMenu = (t: TabState): MenuItem[] => {
+    const items: MenuItem[] = [
+      { label: "Đóng", icon: IconClose, onSelect: () => void closeTab(t.id) },
+      { label: "Đóng các tab khác", onSelect: () => void closeOtherTabs(t.id) },
+      { label: "Đóng tất cả", onSelect: () => void closeAllTabs() },
+      { separator: true, label: "" },
+      {
+        label: t.pinned ? "Bỏ ghim" : "Ghim",
+        icon: IconPin,
+        onSelect: () => togglePin(t.id),
+      },
+    ];
+    // Tab graph/trống không gắn với file nào — dừng ở nhóm trên.
+    if (!t.path || t.kind === "graph") return items;
+    items.push(
+      {
+        label: "Mở trong cửa sổ mới",
+        icon: IconNewWindow,
+        onSelect: () => void api.openNoteWindow(t.path!).catch((e) => say(String(e))),
+      },
+      { label: "Hiện trong sidebar", icon: IconTree, onSelect: () => revealInTree(t.path!) },
+      { separator: true, label: "" },
+      ...fileActions(t.path),
+    );
+    return items;
+  };
 
   const dirMenu = (path: string): MenuItem[] => [
     { label: "Note mới ở đây", icon: IconNewNote, onSelect: () => void newNoteIn(path) },
@@ -1484,7 +1638,11 @@ export default function App() {
       // Cửa sổ note rời chỉ có đúng 1 tab — để nó ghi thì bộ tab của cửa sổ
       // chính bị xóa sạch ngay khi mở.
       if (!vault || restoring() || SOLO_NOTE) return;
-      const persisted: PersistedTab[] = ts.map((t) => ({ kind: t.kind, path: t.path }));
+      const persisted: PersistedTab[] = ts.map((t) => ({
+        kind: t.kind,
+        path: t.path,
+        pinned: t.pinned,
+      }));
       const idx = Math.max(0, ts.findIndex((t) => t.id === active));
       void saveWorkspace(vault, { tabs: persisted, activeIndex: idx, closedDirs: [...closed] });
     });
@@ -1520,9 +1678,12 @@ export default function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "t") {
         e.preventDefault();
         newTab();
+      } else if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        void go(e.key === "ArrowLeft" ? -1 : 1);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w") {
         e.preventDefault();
-        closeTab(activeId());
+        if (!activeTab()?.pinned) closeTab(activeId());
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "l") {
         e.preventDefault();
         openAi();
@@ -1662,11 +1823,18 @@ export default function App() {
             {(t) => (
               <div
                 class="tab"
-                classList={{ active: t.id === activeId() }}
+                classList={{ active: t.id === activeId(), pinned: t.pinned }}
                 onClick={() => switchTab(t.id)}
-                onAuxClick={(e) => e.button === 1 && closeTab(t.id)}
+                onAuxClick={(e) => e.button === 1 && !t.pinned && closeTab(t.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  openCtx(e, tabMenu(t));
+                }}
                 title={t.path ?? "Tab trống"}
               >
+                <Show when={t.pinned}>
+                  <IconPin class="tab-pin" />
+                </Show>
                 <TabIcon kind={t.kind} />
                 <span class="tab-label">{tabTitle(t)}</span>
                 <button
@@ -1693,6 +1861,22 @@ export default function App() {
           </button>
         </div>
         <div class="note-header">
+          <button
+            class="nav-btn"
+            title="Quay lại (Alt+←)"
+            disabled={!canBack()}
+            onClick={() => void go(-1)}
+          >
+            <IconBack />
+          </button>
+          <button
+            class="nav-btn"
+            title="Đi tới (Alt+→)"
+            disabled={!canForward()}
+            onClick={() => void go(1)}
+          >
+            <IconForward />
+          </button>
           <span class="note-path">
             <Show when={view() === "graph"}>
               <IconGraph />
