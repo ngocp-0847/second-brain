@@ -1,5 +1,6 @@
 // Cây thư mục dựng từ danh sách path phẳng của vault (kèm folder rỗng từ dirs).
-import { createMemo, For, Show } from "solid-js";
+// Note (.md) và canvas (.canvas) nằm CHUNG một cây — canvas chỉ khác ở cái badge.
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { NoteMeta } from "./api";
 import { NOTE_DRAG_MIME } from "./dnd";
 import { IconDirArrow } from "./icons";
@@ -9,14 +10,19 @@ export interface TreeEditing {
   kind: "note" | "dir";
 }
 
+/** Một file trong cây. `canvas` để hiện badge và mở đúng view. */
+export interface TreeFile extends NoteMeta {
+  canvas?: boolean;
+}
+
 interface DirNode {
   name: string;
   path: string;
   dirs: DirNode[];
-  files: NoteMeta[];
+  files: TreeFile[];
 }
 
-function buildTree(notes: NoteMeta[], dirs: string[]): DirNode {
+function buildTree(notes: TreeFile[], dirs: string[]): DirNode {
   const root: DirNode = { name: "", path: "", dirs: [], files: [] };
   const dirMap = new Map<string, DirNode>([["", root]]);
 
@@ -46,8 +52,14 @@ function buildTree(notes: NoteMeta[], dirs: string[]): DirNode {
 }
 
 function fileName(path: string) {
-  return path.split("/").pop()!.replace(/\.md$/i, "");
+  return path.split("/").pop()!.replace(/\.(md|canvas)$/i, "");
 }
+
+/** Thư mục cha của một path ("" = gốc vault). */
+const parentDir = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+
+/** Folder đang được rê qua khi kéo file — dùng để tô sáng đúng một chỗ. */
+const [dragOverDir, setDragOverDir] = createSignal<string | null>(null);
 
 /** Ô nhập tên inline khi vừa tạo note/folder: Enter/blur xác nhận, Esc giữ tên hiện tại. */
 function RenameInput(props: { value: string; onCommit: (v: string) => void }) {
@@ -91,6 +103,32 @@ interface DirProps {
   onToggleDir: (path: string, open: boolean) => void;
   onContextNote?: (e: MouseEvent, path: string) => void;
   onContextDir?: (e: MouseEvent, path: string) => void;
+  /** Thả file vào folder ("" = gốc vault) để di chuyển. */
+  onMoveFile?: (from: string, toDir: string) => void;
+}
+
+/** Handler dùng chung cho mọi drop target (folder và vùng gốc). */
+function dropHandlers(dir: string, onMove?: (from: string, toDir: string) => void) {
+  const accepts = (e: DragEvent) => !!e.dataTransfer?.types.includes(NOTE_DRAG_MIME);
+  return {
+    onDragOver: (e: DragEvent) => {
+      if (!onMove || !accepts(e)) return;
+      // preventDefault ở dragover mới là thứ cho phép thả.
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "move";
+      setDragOverDir(dir);
+    },
+    onDragLeave: () => setDragOverDir((d) => (d === dir ? null : d)),
+    onDrop: (e: DragEvent) => {
+      setDragOverDir(null);
+      if (!onMove || !accepts(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const from = e.dataTransfer!.getData(NOTE_DRAG_MIME);
+      // Thả về đúng chỗ cũ thì không làm gì cho khỏi tốn một lần rewrite link.
+      if (from && parentDir(from) !== dir) onMove(from, dir);
+    },
+  };
 }
 
 function Dir(props: DirProps) {
@@ -108,11 +146,13 @@ function Dir(props: DirProps) {
           >
             <summary
               class="tree-dir"
+              classList={{ "drop-target": dragOverDir() === d.path }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 props.onContextDir?.(e, d.path);
               }}
+              {...dropHandlers(d.path, props.onMoveFile)}
             >
               <IconDirArrow class="tree-dir-arrow" />
               <Show
@@ -141,8 +181,11 @@ function Dir(props: DirProps) {
               // drop target khác (editor, app ngoài) vẫn nhận được đường dẫn.
               e.dataTransfer?.setData(NOTE_DRAG_MIME, f.path);
               e.dataTransfer?.setData("text/plain", f.path);
-              if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
+              // copyMove: canvas nhận là "copy" (chèn card), folder nhận là
+              // "move" (di chuyển file). Để "copy" thì folder không thả được.
+              if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
             }}
+            onDragEnd={() => setDragOverDir(null)}
             onClick={(e) =>
               e.ctrlKey && props.onOpenNewTab
                 ? props.onOpenNewTab(f.path)
@@ -162,6 +205,9 @@ function Dir(props: DirProps) {
             >
               <RenameInput value={fileName(f.path)} onCommit={props.onRename} />
             </Show>
+            <Show when={f.canvas}>
+              <span class="canvas-badge">CANVAS</span>
+            </Show>
           </div>
         )}
       </For>
@@ -170,7 +216,8 @@ function Dir(props: DirProps) {
 }
 
 export function Tree(props: {
-  notes: NoteMeta[];
+  /** Note và canvas trộn chung; canvas đánh dấu bằng `canvas: true`. */
+  notes: TreeFile[];
   dirs: string[];
   filter: string;
   current: string | null;
@@ -184,6 +231,7 @@ export function Tree(props: {
   onContextDir?: (e: MouseEvent, path: string) => void;
   /** Chuột phải vào khoảng trống của tree = thao tác ở gốc vault. */
   onContextRoot?: (e: MouseEvent) => void;
+  onMoveFile?: (from: string, toDir: string) => void;
 }) {
   const filtered = createMemo(() => {
     const q = props.filter.trim().toLowerCase();
@@ -200,12 +248,16 @@ export function Tree(props: {
   return (
     <div
       class="tree"
+      classList={{ "drop-target": dragOverDir() === "" }}
       // Note/folder đã stopPropagation, nên tới đây chỉ còn chuột phải vào
       // khoảng trống — kể cả khi rơi vào .tree-indent của một folder.
       onContextMenu={(e) => {
         e.preventDefault();
         props.onContextRoot?.(e);
       }}
+      // Thả ra vùng trống = đưa file về gốc vault. Drop của folder đã
+      // stopPropagation nên không lọt xuống đây.
+      {...dropHandlers("", props.onMoveFile)}
     >
       <Show when={filtered().length === 0 && props.dirs.length === 0}>
         <div class="tree-empty">Không có note nào</div>
@@ -222,6 +274,7 @@ export function Tree(props: {
         onToggleDir={props.onToggleDir}
         onContextNote={props.onContextNote}
         onContextDir={props.onContextDir}
+        onMoveFile={props.onMoveFile}
       />
     </div>
   );

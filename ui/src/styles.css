@@ -296,21 +296,31 @@ details[open] > .tree-dir .tree-dir-arrow {
   font-style: italic;
 }
 
-.canvas-item {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-sm);
-  margin: 0 var(--sp-xs);
-}
-
+/* Badge nằm inline trong .tree-file (khối, không flex) để text-overflow của
+ * tên file vẫn hoạt động. */
 .canvas-badge {
+  display: inline-block;
+  margin-left: var(--sp-sm);
+  vertical-align: middle;
   font-size: 9px;
   letter-spacing: 0.08em;
   color: var(--fg-faint);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 1px var(--sp-xs);
-  flex-shrink: 0;
+}
+
+/* Folder (hoặc vùng gốc) đang được rê file qua khi kéo-thả. */
+.tree-dir.drop-target,
+.tree.drop-target {
+  background: var(--accent-bg);
+  outline: 1px solid var(--accent-border);
+  outline-offset: -1px;
+}
+
+/* Vùng gốc phải đủ cao để còn chỗ thả khi vault ít note. */
+.tree {
+  min-height: 100%;
 }
 
 /* ---- editor ---- */
