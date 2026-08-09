@@ -64,10 +64,14 @@ export {
   FolderOpen as IconReveal,
   Bookmark as IconBookmark,
   BookmarkX as IconUnbookmark,
+  // ---- thanh format của card text trên canvas ----
+  Bold as IconBold,
+  Italic as IconItalic,
+  Heading as IconHeading,
+  Code as IconCode,
   // ---- canvas toolbar ----
   MousePointer2 as IconCursor,
   Type as IconTextCard,
-  StickyNote as IconSticky,
   ChevronUp as IconCaret,
   FileText as IconNoteCard,
   Image as IconImage,

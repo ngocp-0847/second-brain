@@ -6,21 +6,27 @@
 // - `shape` trên node text là extension NGOÀI spec: Obsidian bỏ qua và hiện card chữ nhật
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { api } from "./api";
+import { api, type NoteMeta } from "./api";
 import { NOTE_DRAG_MIME } from "./dnd";
+import { createEditor, type EditorHandle } from "./editor";
 import {
+  IconBold,
+  IconBullets,
   IconCaret,
+  IconCode,
   IconCursor,
+  IconHeading,
   IconHelp,
   IconImage,
+  IconItalic,
   IconLink,
   IconNoteCard,
   IconRedo,
-  IconSticky,
   IconTextCard,
   IconTrash,
   IconUndo,
 } from "./icons";
+import { Markdown } from "./markdown";
 
 export type ShapeKind =
   | "rect"
@@ -215,87 +221,6 @@ const SHAPES: { kind: ShapeKind; label: string }[] = [
   { kind: "sticky", label: "Giấy nhớ" },
 ];
 
-// ---- text card: URL trần, [label](url), [[wikilink]] bấm được (chỉ khâu hiển thị,
-// nội dung text giữ nguyên trong file .canvas — tương thích Obsidian) ----
-const LINKIFY =
-  /(!?\[\[([^\[\]]+?)\]\])|(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(https?:\/\/[^\s<>"')\]]+)/g;
-
-type LinkPart =
-  | { t: "text"; s: string }
-  | { t: "url"; href: string; label: string }
-  | { t: "wiki"; target: string; label: string };
-
-function LinkifiedText(props: { text: string; onOpenNote: (path: string) => void }) {
-  const parts = createMemo<LinkPart[]>(() => {
-    const out: LinkPart[] = [];
-    const text = props.text;
-    let last = 0;
-    for (const m of text.matchAll(LINKIFY)) {
-      if (m.index! > last) out.push({ t: "text", s: text.slice(last, m.index) });
-      if (m[1]) {
-        const inner = m[2];
-        const pipe = inner.indexOf("|");
-        const target = (pipe >= 0 ? inner.slice(0, pipe) : inner).split("#")[0].trim();
-        out.push({
-          t: "wiki",
-          target,
-          label: pipe >= 0 ? inner.slice(pipe + 1) : inner,
-        });
-      } else if (m[3]) {
-        out.push({ t: "url", href: m[5], label: m[4] });
-      } else {
-        out.push({ t: "url", href: m[6], label: m[6] });
-      }
-      last = m.index! + m[0].length;
-    }
-    if (last < text.length) out.push({ t: "text", s: text.slice(last) });
-    return out;
-  });
-
-  const openWiki = async (target: string) => {
-    const p = await api.resolveLink(target).catch(() => null);
-    if (p) props.onOpenNote(p);
-  };
-
-  return (
-    <For each={parts()}>
-      {(p) =>
-        p.t === "text" ? (
-          <span>{p.s}</span>
-        ) : p.t === "url" ? (
-          <a
-            class="canvas-link"
-            href={p.href}
-            title={p.href}
-            onMouseDown={(e) => e.stopPropagation()}
-            onDblClick={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              window.open(p.href, "_blank");
-            }}
-          >
-            {p.label}
-          </a>
-        ) : (
-          <a
-            class="canvas-link canvas-link-wiki"
-            title={`Mở "${p.target}"`}
-            onMouseDown={(e) => e.stopPropagation()}
-            onDblClick={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              openWiki(p.target);
-            }}
-          >
-            {p.label}
-          </a>
-        )
-      }
-    </For>
-  );
-}
 
 // ---- ảnh trong canvas: file node trỏ tới ảnh sẽ render như Obsidian ----
 const IMG_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
@@ -398,8 +323,116 @@ const ShapeGlyph = (props: { kind: ShapeKind }) => (
   </svg>
 );
 
+/** Editor đầy đủ cho card text (kể cả giấy nhớ): dùng chính CodeMirror của note
+ *  editor nên có live-preview (đậm/nghiêng/heading hiện ngay khi gõ), autocomplete
+ *  `[[wikilink]]`, và mọi phím tắt quen thuộc — thay cho textarea trơ trước đây.
+ *
+ *  Chỉ commit khi đóng, KHÔNG commit theo từng phím: `mutate` tạo object node mới
+ *  nên `<For>` sẽ dựng lại DOM của card và giết luôn EditorView đang gõ dở. */
+function CardEditor(props: {
+  text: string;
+  getNotes: () => NoteMeta[];
+  onOpenNote: (path: string) => void;
+  onDone: (text: string) => void;
+}) {
+  let host!: HTMLDivElement;
+  let wrapper!: HTMLDivElement;
+  let handle: EditorHandle | undefined;
+  let committed = false;
+
+  const commit = () => {
+    if (committed || !handle) return;
+    committed = true;
+    props.onDone(handle.getContent());
+  };
+
+  onMount(() => {
+    handle = createEditor({
+      parent: host,
+      getNotes: props.getNotes,
+      // Autosave của CM không dùng ở đây — xem ghi chú về remount phía trên.
+      onSave: () => {},
+      onOpenLink: props.onOpenNote,
+      dark: !document.documentElement.matches('[data-theme="light"]'),
+    });
+    handle.setContent(props.text);
+    queueMicrotask(() => handle?.view.focus());
+  });
+
+  onCleanup(() => {
+    commit();
+    handle?.destroy();
+  });
+
+  /** Bọc vùng chọn (đậm/nghiêng/code). Không chọn gì thì chèn cặp dấu và đặt con trỏ vào giữa. */
+  const wrap = (mark: string) => {
+    const v = handle?.view;
+    if (!v) return;
+    const r = v.state.selection.main;
+    const sel = v.state.sliceDoc(r.from, r.to);
+    handle!.replaceRange(r.from, r.to, `${mark}${sel}${mark}`);
+    if (!sel) {
+      const pos = r.from + mark.length;
+      v.dispatch({ selection: { anchor: pos } });
+    }
+    v.focus();
+  };
+
+  /** Đổi tiền tố của dòng hiện tại (heading / bullet). Bấm lại tiền tố cũ = bỏ. */
+  const prefix = (mark: string) => {
+    const v = handle?.view;
+    if (!v) return;
+    const line = v.state.doc.lineAt(v.state.selection.main.from);
+    const bare = line.text.replace(/^\s*(#{1,6}\s+|[-*+]\s+|>\s+)/, "");
+    const next = line.text.trimStart().startsWith(mark) ? bare : `${mark}${bare}`;
+    handle!.replaceRange(line.from, line.to, next);
+    v.focus();
+  };
+
+  return (
+    <div
+      class="card-editor"
+      ref={wrapper}
+      onMouseDown={(e) => e.stopPropagation()}
+      onDblClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation(); // phím tắt canvas (Delete, Esc…) không được cướp phím gõ
+        if (e.key === "Escape") {
+          e.preventDefault();
+          commit();
+        }
+      }}
+      // Bấm ra ngoài card = xong. Nút format nằm trong wrapper nên không tính.
+      onFocusOut={(e) => {
+        if (!wrapper.contains(e.relatedTarget as Node | null)) commit();
+      }}
+    >
+      <div class="card-format" onMouseDown={(e) => e.preventDefault()}>
+        <button title="Đậm (**text**)" onClick={() => wrap("**")}>
+          <IconBold />
+        </button>
+        <button title="Nghiêng (*text*)" onClick={() => wrap("*")}>
+          <IconItalic />
+        </button>
+        <button title="Code (`text`)" onClick={() => wrap("`")}>
+          <IconCode />
+        </button>
+        <span class="card-format-sep" />
+        <button title="Heading (## )" onClick={() => prefix("## ")}>
+          <IconHeading />
+        </button>
+        <button title="Gạch đầu dòng (- )" onClick={() => prefix("- ")}>
+          <IconBullets />
+        </button>
+      </div>
+      <div class="card-editor-host" ref={host} />
+    </div>
+  );
+}
+
 export function CanvasView(props: {
   path: string;
+  getNotes: () => NoteMeta[];
   onOpenNote: (path: string) => void;
   requestNotePick: (cb: (path: string) => void) => void;
 }) {
@@ -1381,24 +1414,24 @@ export function CanvasView(props: {
                     <div class="canvas-file-hint">double-click mở trong trình duyệt</div>
                   </div>
                 ) : editing() === n.id ? (
-                  <textarea
-                    class="canvas-textarea"
-                    value={n.text ?? ""}
-                    autofocus
-                    onBlur={(e) => {
-                      mutate((d) => ({
-                        ...d,
-                        nodes: d.nodes.map((x) =>
-                          x.id === n.id ? { ...x, text: e.currentTarget.value } : x,
-                        ),
-                      }));
+                  <CardEditor
+                    text={n.text ?? ""}
+                    getNotes={props.getNotes}
+                    onOpenNote={props.onOpenNote}
+                    onDone={(text) => {
+                      if (text !== (n.text ?? "")) {
+                        mutate((d) => ({
+                          ...d,
+                          nodes: d.nodes.map((x) => (x.id === n.id ? { ...x, text } : x)),
+                        }));
+                      }
                       setEditing(null);
                     }}
                   />
                 ) : (
                   <div class="canvas-text">
                     <Show when={n.text} fallback={<>…</>}>
-                      <LinkifiedText text={n.text!} onOpenNote={props.onOpenNote} />
+                      <Markdown text={n.text!} onOpenNote={props.onOpenNote} />
                     </Show>
                   </div>
                 )}
@@ -1564,7 +1597,7 @@ export function CanvasView(props: {
         <button
           class="ct-btn"
           classList={{ active: tool().kind === "text" }}
-          title="Card text — click hoặc kéo trên canvas để đặt"
+          title="Card text — click hoặc kéo trên canvas để đặt. Đổi sang giấy nhớ hoặc hình khối bằng bảng shape trên card."
           onClick={() => {
             setShapeMenu(false);
             setTool({ kind: "text" });
@@ -1572,24 +1605,11 @@ export function CanvasView(props: {
         >
           <IconTextCard />
         </button>
-        <button
-          class="ct-btn"
-          classList={{ active: isShapeTool("sticky") }}
-          title="Giấy nhớ — click hoặc kéo trên canvas để đặt"
-          onClick={() => {
-            setShapeMenu(false);
-            setTool({ kind: "shape", shape: "sticky" });
-          }}
-        >
-          <IconSticky />
-        </button>
         <div class="ct-group">
           <button
             class="ct-btn ct-btn-split"
-            classList={{
-              active: tool().kind === "shape" && !isShapeTool("sticky"),
-            }}
-            title="Hình khối — chọn loại rồi click/kéo trên canvas"
+            classList={{ active: tool().kind === "shape" }}
+            title="Hình khối & giấy nhớ — chọn loại rồi click/kéo trên canvas"
             onClick={() => {
               setTool({ kind: "shape", shape: lastShape() });
               setShapeMenu(!shapeMenu());
@@ -1607,7 +1627,7 @@ export function CanvasView(props: {
                     classList={{ active: isShapeTool(s.kind) }}
                     title={s.label}
                     onClick={() => {
-                      if (s.kind !== "sticky") setLastShape(s.kind);
+                      setLastShape(s.kind);
                       setTool({ kind: "shape", shape: s.kind });
                       setShapeMenu(false);
                     }}

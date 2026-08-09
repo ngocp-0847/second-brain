@@ -1742,6 +1742,7 @@ export default function App() {
           {(p) => (
             <CanvasView
               path={p as string}
+              getNotes={notes}
               onOpenNote={openNote}
               requestNotePick={openNotePicker}
             />
