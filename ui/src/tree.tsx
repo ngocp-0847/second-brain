@@ -107,28 +107,38 @@ interface DirProps {
   onMoveFile?: (from: string, toDir: string) => void;
 }
 
-/** Handler dùng chung cho mọi drop target (folder và vùng gốc). */
-function dropHandlers(dir: string, onMove?: (from: string, toDir: string) => void) {
-  const accepts = (e: DragEvent) => !!e.dataTransfer?.types.includes(NOTE_DRAG_MIME);
-  return {
-    onDragOver: (e: DragEvent) => {
-      if (!onMove || !accepts(e)) return;
-      // preventDefault ở dragover mới là thứ cho phép thả.
-      e.preventDefault();
-      e.dataTransfer!.dropEffect = "move";
-      setDragOverDir(dir);
-    },
-    onDragLeave: () => setDragOverDir((d) => (d === dir ? null : d)),
-    onDrop: (e: DragEvent) => {
-      setDragOverDir(null);
-      if (!onMove || !accepts(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const from = e.dataTransfer!.getData(NOTE_DRAG_MIME);
-      // Thả về đúng chỗ cũ thì không làm gì cho khỏi tốn một lần rewrite link.
-      if (from && parentDir(from) !== dir) onMove(from, dir);
-    },
-  };
+type MoveFn = (from: string, toDir: string) => void;
+
+/** Lúc dragover, dataTransfer chưa cho đọc data — chỉ `types` là đọc được. */
+const acceptsDrag = (e: DragEvent) => !!e.dataTransfer?.types.includes(NOTE_DRAG_MIME);
+
+// Ba handler dưới đây phải gắn thành ATTRIBUTE JSX tường minh, không spread
+// `{...obj}` vào element: với spread, Solid đi qua đường runtime nên `onDragOver`
+// không chắc thành addEventListener("dragover") — trước đây thả không ăn vì vậy.
+
+function dropOver(e: DragEvent, dir: string, onMove?: MoveFn) {
+  if (!onMove || !acceptsDrag(e)) return;
+  // preventDefault ở dragover mới là thứ cho phép thả; thiếu nó thì onDrop
+  // không bao giờ bắn. stopPropagation để folder trong cùng thắng, và để
+  // handler của vùng gốc không giành mất highlight.
+  e.preventDefault();
+  e.stopPropagation();
+  e.dataTransfer!.dropEffect = "move";
+  setDragOverDir(dir);
+}
+
+function dropLeave(dir: string) {
+  setDragOverDir((d) => (d === dir ? null : d));
+}
+
+function dropOn(e: DragEvent, dir: string, onMove?: MoveFn) {
+  setDragOverDir(null);
+  if (!onMove || !acceptsDrag(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const from = e.dataTransfer!.getData(NOTE_DRAG_MIME);
+  // Thả về đúng chỗ cũ thì không làm gì cho khỏi tốn một lần rewrite link.
+  if (from && parentDir(from) !== dir) onMove(from, dir);
 }
 
 function Dir(props: DirProps) {
@@ -136,6 +146,9 @@ function Dir(props: DirProps) {
     <>
       <For each={props.node.dirs}>
         {(d) => (
+          // Drop target là CẢ khối details (kể cả vùng thụt lề bên trong), không
+          // riêng dòng tên: thả vào khoảng trống trong folder cũng là vào folder
+          // đó. Folder lồng nhau thì cái trong cùng thắng nhờ stopPropagation.
           <details
             open={props.filtering || !props.closedDirs.has(d.path)}
             onToggle={(e) => {
@@ -143,6 +156,9 @@ function Dir(props: DirProps) {
               if (props.filtering) return;
               props.onToggleDir(d.path, e.currentTarget.open);
             }}
+            onDragOver={(e) => dropOver(e, d.path, props.onMoveFile)}
+            onDragLeave={() => dropLeave(d.path)}
+            onDrop={(e) => dropOn(e, d.path, props.onMoveFile)}
           >
             <summary
               class="tree-dir"
@@ -152,7 +168,6 @@ function Dir(props: DirProps) {
                 e.stopPropagation();
                 props.onContextDir?.(e, d.path);
               }}
-              {...dropHandlers(d.path, props.onMoveFile)}
             >
               <IconDirArrow class="tree-dir-arrow" />
               <Show
@@ -175,7 +190,10 @@ function Dir(props: DirProps) {
             classList={{ active: props.current === f.path }}
             // Dùng cho "Hiện trong sidebar": tìm đúng dòng để cuộn tới.
             data-path={f.path}
-            draggable
+            // "true" tường minh: `draggable` trần có thể ra attribute rỗng, mà
+            // draggable="" là giá trị không hợp lệ → về mặc định auto → div
+            // KHÔNG kéo được.
+            draggable="true"
             onDragStart={(e) => {
               // Kéo thả vào canvas để chèn card note. Kèm text/plain cho các
               // drop target khác (editor, app ngoài) vẫn nhận được đường dẫn.
@@ -255,9 +273,11 @@ export function Tree(props: {
         e.preventDefault();
         props.onContextRoot?.(e);
       }}
-      // Thả ra vùng trống = đưa file về gốc vault. Drop của folder đã
-      // stopPropagation nên không lọt xuống đây.
-      {...dropHandlers("", props.onMoveFile)}
+      // Thả ra vùng trống = đưa file về gốc vault. Folder đã stopPropagation ở
+      // cả dragover lẫn drop nên không lọt xuống đây.
+      onDragOver={(e) => dropOver(e, "", props.onMoveFile)}
+      onDragLeave={() => dropLeave("")}
+      onDrop={(e) => dropOn(e, "", props.onMoveFile)}
     >
       <Show when={filtered().length === 0 && props.dirs.length === 0}>
         <div class="tree-empty">Không có note nào</div>
