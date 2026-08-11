@@ -9,6 +9,8 @@ export interface PersistedTab {
   kind: "empty" | "note" | "graph" | "canvas";
   /** note: path .md · canvas: path .canvas · graph/empty: null */
   path: string | null;
+  /** Tab ghim. Lịch sử điều hướng KHÔNG lưu — mở lại app là bắt đầu lại. */
+  pinned?: boolean;
 }
 
 export interface Workspace {

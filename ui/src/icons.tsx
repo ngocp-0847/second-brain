@@ -30,6 +30,8 @@ export {
   // ---- tab bar ----
   X as IconClose,
   Plus as IconAdd,
+  ArrowLeft as IconBack,
+  ArrowRight as IconForward,
   PanelRight as IconPanelOpen,
   PanelRightClose as IconPanelClose,
   // ---- note header ----

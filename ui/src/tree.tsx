@@ -133,6 +133,8 @@ function Dir(props: DirProps) {
           <div
             class="tree-file"
             classList={{ active: props.current === f.path }}
+            // Dùng cho "Hiện trong sidebar": tìm đúng dòng để cuộn tới.
+            data-path={f.path}
             draggable
             onDragStart={(e) => {
               // Kéo thả vào canvas để chèn card note. Kèm text/plain cho các
