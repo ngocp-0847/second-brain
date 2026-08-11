@@ -768,8 +768,11 @@ details[open] > .tree-dir .tree-dir-arrow {
   z-index: 4;
 }
 
+/* Chặn drag native của WebView2 trên dòng file: kéo-thả đi qua pointer event
+ * (./dnd). Nếu để WebView2 khởi động drag của OS thì nó bắn pointercancel,
+ * ngắt luôn pointermove — con trỏ hiện icon "cấm" và không thả được vào folder. */
 .tree-file {
-  -webkit-user-drag: element;
+  -webkit-user-drag: none;
 }
 
 .canvas-host.placing .canvas-toolbar {

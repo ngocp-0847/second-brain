@@ -72,6 +72,11 @@ function resolve(x: number, y: number): DropTarget {
 export function beginDrag(e: PointerEvent, path: string, label: string) {
   // Chỉ chuột trái; chuột giữa/phải có ý nghĩa khác (mở tab mới / menu).
   if (e.button !== 0) return;
+  // Đang đổi tên tại chỗ: bấm trong ô input là để đặt con trỏ / bôi đen chữ.
+  if ((e.target as HTMLElement | null)?.closest("input, textarea")) return;
+  // Cờ còn sót của lần kéo trước (bị hủy nên không có click để tiêu thụ) sẽ ăn
+  // mất cú click này — xóa ngay từ pointerdown.
+  dragged = false;
   const startX = e.clientX;
   const startY = e.clientY;
   let active = false;
@@ -89,22 +94,34 @@ export function beginDrag(e: PointerEvent, path: string, label: string) {
     setTarget(resolve(ev.clientX, ev.clientY));
   };
 
-  const up = () => {
+  // Drag native của WebView2 làm mất pointermove và bắn pointercancel → kéo chết
+  // giữa đường, con trỏ hiện icon "cấm". CSS đã đặt -webkit-user-drag: none, đây
+  // là chốt thứ hai cho mọi phần tử tự nhận drag (ảnh, link) nằm trong dòng file.
+  const stopNativeDrag = (ev: Event) => ev.preventDefault();
+
+  const finish = (drop: boolean) => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
-    window.removeEventListener("pointercancel", up);
+    window.removeEventListener("pointercancel", cancel);
+    window.removeEventListener("dragstart", stopNativeDrag);
     const t = target();
     const d = drag();
     setDrag(null);
     setTarget(null);
-    if (!active || !d) return;
+    if (!drop || !active || !d) return;
     if (t?.kind === "dir") onDirDrop?.(d.path, t.dir);
     else if (t?.kind === "canvas") onCanvasDrop?.(d.path, t.x, t.y);
   };
 
+  const up = () => finish(true);
+  // Bị hủy (WebView2 giành pointer, tab mất focus…) thì bỏ, đừng di chuyển file
+  // vào chỗ con trỏ tình cờ đang nằm.
+  const cancel = () => finish(false);
+
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
-  window.addEventListener("pointercancel", up);
+  window.addEventListener("pointercancel", cancel);
+  window.addEventListener("dragstart", stopNativeDrag);
 }
 
 /** "Bóng" đi theo con trỏ trong lúc kéo. Render một lần ở App. */
