@@ -310,6 +310,26 @@ details[open] > .tree-dir .tree-dir-arrow {
   padding: 1px var(--sp-xs);
 }
 
+/* "Bóng" đi theo con trỏ khi kéo file. pointer-events:none để elementFromPoint
+ * nhìn xuyên qua nó, nếu không thì luôn tự trả về chính cái bóng. */
+.drag-ghost {
+  position: fixed;
+  z-index: 70;
+  pointer-events: none;
+  max-width: 220px;
+  padding: 3px var(--sp-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow-card);
+  opacity: 0.95;
+}
+
 /* Folder (hoặc vùng gốc) đang được rê file qua khi kéo-thả. */
 .tree-dir.drop-target,
 .tree.drop-target {

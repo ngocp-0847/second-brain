@@ -77,7 +77,8 @@ import {
 } from "./icons";
 import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { TermPanel } from "./terminal";
-import { Tree, type TreeEditing, type TreeFile } from "./tree";
+import { DragGhost, setDirDropHandler } from "./dnd";
+import { parentDir, Tree, type TreeEditing, type TreeFile } from "./tree";
 import {
   forgetVault,
   getBookmarks,
@@ -1128,6 +1129,12 @@ export default function App() {
     }
   };
 
+  // Thả file vào folder trong sidebar → cùng một đường với menu "Di chuyển tới…".
+  // Thả về đúng folder cũ thì bỏ qua, khỏi tốn một lần rewrite link.
+  setDirDropHandler((from, dir) => {
+    if (parentDir(from) !== dir) void doMoveFile(from, dir);
+  });
+
   const moveFileTo = (path: string) => {
     setFolderQuery("");
     setFolderPick({
@@ -1789,7 +1796,6 @@ export default function App() {
               onContextNote={(e, p) => openCtx(e, fileMenu(p))}
               onContextDir={(e, p) => openCtx(e, dirMenu(p))}
               onContextRoot={(e) => openCtx(e, rootMenu())}
-              onMoveFile={(from, dir) => void doMoveFile(from, dir)}
             />
           </div>
         </Show>
@@ -2494,6 +2500,8 @@ export default function App() {
       <Show when={ctxMenu()}>
         {(m) => <ContextMenu anchor={m()} onClose={() => setCtxMenu(null)} />}
       </Show>
+
+      <DragGhost />
     </div>
   );
 }
