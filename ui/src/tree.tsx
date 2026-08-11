@@ -2,7 +2,7 @@
 // Note (.md) và canvas (.canvas) nằm CHUNG một cây — canvas chỉ khác ở cái badge.
 import { createMemo, For, Show } from "solid-js";
 import type { NoteMeta } from "./api";
-import { beginDrag, consumeDragClick, dropDir } from "./dnd";
+import { beginDrag, consumeDragClick, dragPath, dropDir } from "./dnd";
 import { IconDirArrow } from "./icons";
 
 export interface TreeEditing {
@@ -151,7 +151,9 @@ function Dir(props: DirProps) {
         {(f) => (
           <div
             class="tree-file"
-            classList={{ active: props.current === f.path }}
+            // `dragging`: dòng đang được nhấc lên — nhìn vào là biết bóng theo
+            // con trỏ là file nào.
+            classList={{ active: props.current === f.path, dragging: dragPath() === f.path }}
             // Dùng cho "Hiện trong sidebar": tìm đúng dòng để cuộn tới.
             data-path={f.path}
             onPointerDown={(e) => beginDrag(e, f.path, fileName(f.path))}

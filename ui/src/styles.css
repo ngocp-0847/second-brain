@@ -278,6 +278,16 @@ details[open] > .tree-dir .tree-dir-arrow {
   color: var(--accent-strong);
 }
 
+/* Dòng đang bị kéo: tô đậm hơn .active và viền gạch để đọc ra "chỗ này đã được
+ * nhấc lên", nội dung thật thì đang nằm trên bóng theo con trỏ. Đặt sau .active
+ * nên thắng khi file đang kéo cũng là file đang mở. */
+.tree-file.dragging {
+  background: var(--accent-bg-hover);
+  color: var(--accent-strong);
+  outline: 1px dashed var(--accent-border);
+  outline-offset: -1px;
+}
+
 .tree-rename {
   width: 100%;
   padding: 1px 4px;
@@ -311,23 +321,92 @@ details[open] > .tree-dir .tree-dir-arrow {
 }
 
 /* "Bóng" đi theo con trỏ khi kéo file. pointer-events:none để elementFromPoint
- * nhìn xuyên qua nó, nếu không thì luôn tự trả về chính cái bóng. */
+ * nhìn xuyên qua nó, nếu không thì luôn tự trả về chính cái bóng.
+ *
+ * Vị trí đặt bằng left/top (JS ghi mỗi pointermove), nên transform để dành
+ * riêng cho hiệu ứng nhấc-lên — hai thứ không tranh nhau. */
 .drag-ghost {
   position: fixed;
   z-index: 70;
   pointer-events: none;
-  max-width: 220px;
-  padding: 3px var(--sp-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  max-width: 300px;
+  padding: var(--sp-sm) var(--sp-md);
   background: var(--bg-panel);
   border: 1px solid var(--accent-border);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-lg);
   color: var(--fg);
+  box-shadow: var(--shadow-modal);
+  animation: drag-lift 0.14s ease-out, drag-float 2.6s ease-in-out 0.14s infinite;
+  will-change: transform;
+}
+
+/* Rê tới chỗ thả được thì viền sáng lên, thành cặp tín hiệu với folder đang sáng. */
+.drag-ghost.has-target {
+  border-color: var(--accent);
+}
+
+.drag-ghost svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+
+/* min-width:0 để text-overflow của con hoạt động trong flex. */
+.drag-ghost-text {
+  min-width: 0;
+}
+
+.drag-ghost-label {
+  color: var(--fg-strong);
   font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: var(--shadow-card);
-  opacity: 0.95;
+}
+
+.drag-ghost-hint {
+  color: var(--fg-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Vừa nhấc lên: phóng nhẹ + nghiêng, cho cảm giác tờ giấy rời khỏi mặt bàn. */
+@keyframes drag-lift {
+  from {
+    transform: scale(0.94) rotate(0deg);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) rotate(-1.5deg);
+    opacity: 1;
+  }
+}
+
+/* Bồng bềnh: nhấp nhô 3px quanh vị trí con trỏ, đủ để thấy là đang "cầm trên
+ * tay" mà không làm nhãn khó đọc. */
+@keyframes drag-float {
+  0%,
+  100% {
+    transform: translateY(0) scale(1) rotate(-1.5deg);
+  }
+  50% {
+    transform: translateY(-3px) scale(1.015) rotate(-2.5deg);
+  }
+}
+
+/* Ai tắt hiệu ứng chuyển động thì bỏ nhấp nhô, giữ lại độ nghiêng tĩnh — vẫn
+ * đọc ra là đang nhấc lên mà không có gì động đậy. */
+@media (prefers-reduced-motion: reduce) {
+  .drag-ghost {
+    animation: none;
+    transform: rotate(-1.5deg);
+  }
 }
 
 /* Folder (hoặc vùng gốc) đang được rê file qua khi kéo-thả. */
