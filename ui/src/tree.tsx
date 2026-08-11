@@ -1,7 +1,8 @@
 // Cây thư mục dựng từ danh sách path phẳng của vault (kèm folder rỗng từ dirs).
+// Note (.md) và canvas (.canvas) nằm CHUNG một cây — canvas chỉ khác ở cái badge.
 import { createMemo, For, Show } from "solid-js";
 import type { NoteMeta } from "./api";
-import { NOTE_DRAG_MIME } from "./dnd";
+import { beginDrag, consumeDragClick, dropDir } from "./dnd";
 import { IconDirArrow } from "./icons";
 
 export interface TreeEditing {
@@ -9,14 +10,19 @@ export interface TreeEditing {
   kind: "note" | "dir";
 }
 
+/** Một file trong cây. `canvas` để hiện badge và mở đúng view. */
+export interface TreeFile extends NoteMeta {
+  canvas?: boolean;
+}
+
 interface DirNode {
   name: string;
   path: string;
   dirs: DirNode[];
-  files: NoteMeta[];
+  files: TreeFile[];
 }
 
-function buildTree(notes: NoteMeta[], dirs: string[]): DirNode {
+function buildTree(notes: TreeFile[], dirs: string[]): DirNode {
   const root: DirNode = { name: "", path: "", dirs: [], files: [] };
   const dirMap = new Map<string, DirNode>([["", root]]);
 
@@ -46,8 +52,11 @@ function buildTree(notes: NoteMeta[], dirs: string[]): DirNode {
 }
 
 function fileName(path: string) {
-  return path.split("/").pop()!.replace(/\.md$/i, "");
+  return path.split("/").pop()!.replace(/\.(md|canvas)$/i, "");
 }
+
+/** Thư mục cha của một path ("" = gốc vault). */
+export const parentDir = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 
 /** Ô nhập tên inline khi vừa tạo note/folder: Enter/blur xác nhận, Esc giữ tên hiện tại. */
 function RenameInput(props: { value: string; onCommit: (v: string) => void }) {
@@ -93,12 +102,21 @@ interface DirProps {
   onContextDir?: (e: MouseEvent, path: string) => void;
 }
 
+// Kéo-thả đi qua ./dnd (pointer event), không dùng HTML5 drag-and-drop: WebView2
+// ở app này không bắn dragstart. Vùng nhận thả chỉ cần đánh dấu data-drop-dir,
+// dnd tự tìm bằng elementFromPoint.
+
 function Dir(props: DirProps) {
   return (
     <>
       <For each={props.node.dirs}>
         {(d) => (
+          // Vùng nhận thả là CẢ khối details (kể cả phần thụt lề bên trong), nên
+          // thả vào khoảng trống trong folder cũng vào đúng folder đó. Folder
+          // lồng nhau: elementFromPoint trả về element sâu nhất nên closest()
+          // tìm ra cái trong cùng.
           <details
+            data-drop-dir={d.path}
             open={props.filtering || !props.closedDirs.has(d.path)}
             onToggle={(e) => {
               // Lúc đang lọc, mọi folder bị ép mở — đừng ghi đè lựa chọn của user.
@@ -108,6 +126,7 @@ function Dir(props: DirProps) {
           >
             <summary
               class="tree-dir"
+              classList={{ "drop-target": dropDir() === d.path }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -135,19 +154,13 @@ function Dir(props: DirProps) {
             classList={{ active: props.current === f.path }}
             // Dùng cho "Hiện trong sidebar": tìm đúng dòng để cuộn tới.
             data-path={f.path}
-            draggable
-            onDragStart={(e) => {
-              // Kéo thả vào canvas để chèn card note. Kèm text/plain cho các
-              // drop target khác (editor, app ngoài) vẫn nhận được đường dẫn.
-              e.dataTransfer?.setData(NOTE_DRAG_MIME, f.path);
-              e.dataTransfer?.setData("text/plain", f.path);
-              if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
+            onPointerDown={(e) => beginDrag(e, f.path, fileName(f.path))}
+            onClick={(e) => {
+              // Vừa kéo xong thì pointerup vẫn sinh ra click — đừng mở note.
+              if (consumeDragClick()) return;
+              if (e.ctrlKey && props.onOpenNewTab) props.onOpenNewTab(f.path);
+              else props.onOpen(f.path);
             }}
-            onClick={(e) =>
-              e.ctrlKey && props.onOpenNewTab
-                ? props.onOpenNewTab(f.path)
-                : props.onOpen(f.path)
-            }
             onAuxClick={(e) => e.button === 1 && props.onOpenNewTab?.(f.path)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -162,6 +175,9 @@ function Dir(props: DirProps) {
             >
               <RenameInput value={fileName(f.path)} onCommit={props.onRename} />
             </Show>
+            <Show when={f.canvas}>
+              <span class="canvas-badge">CANVAS</span>
+            </Show>
           </div>
         )}
       </For>
@@ -170,7 +186,8 @@ function Dir(props: DirProps) {
 }
 
 export function Tree(props: {
-  notes: NoteMeta[];
+  /** Note và canvas trộn chung; canvas đánh dấu bằng `canvas: true`. */
+  notes: TreeFile[];
   dirs: string[];
   filter: string;
   current: string | null;
@@ -200,6 +217,10 @@ export function Tree(props: {
   return (
     <div
       class="tree"
+      // Thả ra vùng trống = đưa file về gốc vault. data-drop-dir="" phải ở
+      // NGOÀI cùng để closest() của folder con thắng trước.
+      data-drop-dir=""
+      classList={{ "drop-target": dropDir() === "" }}
       // Note/folder đã stopPropagation, nên tới đây chỉ còn chuột phải vào
       // khoảng trống — kể cả khi rơi vào .tree-indent của một folder.
       onContextMenu={(e) => {

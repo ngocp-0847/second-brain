@@ -296,21 +296,51 @@ details[open] > .tree-dir .tree-dir-arrow {
   font-style: italic;
 }
 
-.canvas-item {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-sm);
-  margin: 0 var(--sp-xs);
-}
-
+/* Badge nằm inline trong .tree-file (khối, không flex) để text-overflow của
+ * tên file vẫn hoạt động. */
 .canvas-badge {
+  display: inline-block;
+  margin-left: var(--sp-sm);
+  vertical-align: middle;
   font-size: 9px;
   letter-spacing: 0.08em;
   color: var(--fg-faint);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 1px var(--sp-xs);
-  flex-shrink: 0;
+}
+
+/* "Bóng" đi theo con trỏ khi kéo file. pointer-events:none để elementFromPoint
+ * nhìn xuyên qua nó, nếu không thì luôn tự trả về chính cái bóng. */
+.drag-ghost {
+  position: fixed;
+  z-index: 70;
+  pointer-events: none;
+  max-width: 220px;
+  padding: 3px var(--sp-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow-card);
+  opacity: 0.95;
+}
+
+/* Folder (hoặc vùng gốc) đang được rê file qua khi kéo-thả. */
+.tree-dir.drop-target,
+.tree.drop-target {
+  background: var(--accent-bg);
+  outline: 1px solid var(--accent-border);
+  outline-offset: -1px;
+}
+
+/* Vùng gốc phải đủ cao để còn chỗ thả khi vault ít note. */
+.tree {
+  min-height: 100%;
 }
 
 /* ---- editor ---- */
@@ -738,8 +768,11 @@ details[open] > .tree-dir .tree-dir-arrow {
   z-index: 4;
 }
 
+/* Chặn drag native của WebView2 trên dòng file: kéo-thả đi qua pointer event
+ * (./dnd). Nếu để WebView2 khởi động drag của OS thì nó bắn pointercancel,
+ * ngắt luôn pointermove — con trỏ hiện icon "cấm" và không thả được vào folder. */
 .tree-file {
-  -webkit-user-drag: element;
+  -webkit-user-drag: none;
 }
 
 .canvas-host.placing .canvas-toolbar {

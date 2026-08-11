@@ -77,7 +77,8 @@ import {
 } from "./icons";
 import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { TermPanel } from "./terminal";
-import { Tree, type TreeEditing } from "./tree";
+import { DragGhost, setDirDropHandler } from "./dnd";
+import { parentDir, Tree, type TreeEditing, type TreeFile } from "./tree";
 import {
   forgetVault,
   getBookmarks,
@@ -846,11 +847,19 @@ export default function App() {
     setTreeEditing(null);
     if (!ed) return;
     const clean = name.trim().replace(/[\\/]/g, "");
-    const base = ed.path.split("/").pop()!.replace(/\.md$/i, "");
+    const base = fileLabel(ed.path);
     if (!clean || clean === base) return;
     const dir = ed.path.includes("/") ? ed.path.slice(0, ed.path.lastIndexOf("/") + 1) : "";
     try {
-      if (ed.kind === "note") {
+      if (ed.kind === "note" && isCanvas(ed.path)) {
+        // Canvas nằm chung cây với note nên cũng đổi tên inline, nhưng phải đi
+        // qua rename_file: rename_note ép đuôi .md và tra bảng `note`.
+        const to = await api.renameFile(ed.path, `${dir}${clean}`);
+        setCanvases(await api.listCanvases().catch(() => []));
+        retargetTabs(ed.path, to);
+        void retargetBookmark(ed.path, to);
+        if (canvasPath() === ed.path) openCanvas(to);
+      } else if (ed.kind === "note") {
         const to = `${dir}${clean}.md`;
         editor.flush();
         await api.renameNote(ed.path, to);
@@ -1020,6 +1029,14 @@ export default function App() {
 
   const isCanvas = (p: string) => /\.canvas$/i.test(p);
 
+  /** Note + canvas trộn chung cho sidebar — canvas không nằm trong index nên
+   *  phải ghép ở đây, nhưng KHÔNG đụng vào `notes()` (omnibar, autocomplete
+   *  wikilink, graph… chỉ được thấy .md). */
+  const treeFiles = createMemo<TreeFile[]>(() => [
+    ...notes(),
+    ...canvases().map((p) => ({ path: p, title: fileLabel(p), mtime: 0, canvas: true })),
+  ]);
+
   /** Mở đúng loại view theo đuôi file (bookmark, cửa sổ rời, sau khi move…). */
   const openByPath = async (p: string) => (isCanvas(p) ? openCanvas(p) : await openNote(p));
 
@@ -1082,65 +1099,53 @@ export default function App() {
     },
   ];
 
-  /** Di chuyển sang folder khác. Note đi qua `renameNote` để wikilink được
-   *  rewrite; canvas không nằm trong link graph nên dùng `renameFile`. */
+  /** Di chuyển file sang folder khác ("" = gốc vault). Note đi qua `renameNote`
+   *  để wikilink được rewrite; canvas không nằm trong link graph nên `renameFile`. */
+  const doMoveFile = async (path: string, dir: string) => {
+    const name = path.split("/").pop()!;
+    const to = dir ? `${dir}/${name}` : name;
+    if (to === path) return;
+    try {
+      editor.flush();
+      if (isCanvas(path)) {
+        await api.renameFile(path, to);
+        setCanvases(await api.listCanvases().catch(() => []));
+        retargetTabs(path, to);
+        if (canvasPath() === path) openCanvas(to);
+        say("Đã di chuyển canvas");
+      } else {
+        const n = await api.renameNote(path, to);
+        applyInfo(await api.refresh());
+        retargetTabs(path, to);
+        if (current() === path) {
+          currentPath = null;
+          await openNote(to);
+        }
+        say(`Đã di chuyển, rewrite ${n} link trỏ tới`);
+      }
+      void retargetBookmark(path, to);
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  // Thả file vào folder trong sidebar → cùng một đường với menu "Di chuyển tới…".
+  // Thả về đúng folder cũ thì bỏ qua, khỏi tốn một lần rewrite link.
+  setDirDropHandler((from, dir) => {
+    if (parentDir(from) !== dir) void doMoveFile(from, dir);
+  });
+
   const moveFileTo = (path: string) => {
     setFolderQuery("");
     setFolderPick({
       title: `Di chuyển "${fileLabel(path)}" tới…`,
-      onOk: async (dir) => {
-        const name = path.split("/").pop()!;
-        const to = dir ? `${dir}/${name}` : name;
-        if (to === path) return;
-        try {
-          editor.flush();
-          if (isCanvas(path)) {
-            await api.renameFile(path, to);
-            setCanvases(await api.listCanvases().catch(() => []));
-            retargetTabs(path, to);
-            if (canvasPath() === path) openCanvas(to);
-            say("Đã di chuyển canvas");
-          } else {
-            const n = await api.renameNote(path, to);
-            applyInfo(await api.refresh());
-            retargetTabs(path, to);
-            if (current() === path) {
-              currentPath = null;
-              await openNote(to);
-            }
-            say(`Đã di chuyển, rewrite ${n} link trỏ tới`);
-          }
-          void retargetBookmark(path, to);
-        } catch (e) {
-          say(String(e));
-        }
-      },
+      onOk: (dir) => void doMoveFile(path, dir),
     });
   };
 
-  /** Đổi tên tại chỗ (giữ nguyên folder). Note dùng ô inline trong tree; canvas
-   *  không nằm trong tree nên hỏi qua modal. */
-  const renameFileAt = (path: string) => {
-    if (!isCanvas(path)) return setTreeEditing({ path, kind: "note" });
-    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
-    setPromptCfg({
-      title: "Tên mới cho canvas",
-      value: fileLabel(path),
-      onOk: async (v) => {
-        const clean = v.trim().replace(/[\\/]/g, "");
-        if (!clean || clean === fileLabel(path)) return;
-        try {
-          const to = await api.renameFile(path, `${dir}${clean}`);
-          setCanvases(await api.listCanvases().catch(() => []));
-          retargetTabs(path, to);
-          void retargetBookmark(path, to);
-          if (canvasPath() === path) openCanvas(to);
-        } catch (e) {
-          say(String(e));
-        }
-      },
-    });
-  };
+  /** Đổi tên tại chỗ bằng ô inline trong tree — note và canvas như nhau.
+   *  `finishTreeRename` tự chọn lệnh đúng theo đuôi file. */
+  const renameFileAt = (path: string) => setTreeEditing({ path, kind: "note" });
 
   const duplicateFile = async (path: string) => {
     try {
@@ -1778,41 +1783,20 @@ export default function App() {
               </details>
             </Show>
             <Tree
-              notes={notes()}
+              notes={treeFiles()}
               dirs={dirs()}
               filter={""}
-              current={current()}
+              current={view() === "canvas" ? canvasPath() : current()}
               editing={treeEditing()}
               closedDirs={closedDirs()}
-              onOpen={openNote}
-              onOpenNewTab={openNoteInNewTab}
+              onOpen={(p) => void openByPath(p)}
+              onOpenNewTab={(p) => void openInNewTab(p)}
               onRename={finishTreeRename}
               onToggleDir={toggleDir}
               onContextNote={(e, p) => openCtx(e, fileMenu(p))}
               onContextDir={(e, p) => openCtx(e, dirMenu(p))}
               onContextRoot={(e) => openCtx(e, rootMenu())}
             />
-            <Show when={canvases().length > 0}>
-              <div class="panel-title">Canvas</div>
-              <For each={canvases()}>
-                {(c) => (
-                  <div
-                    class="tree-file canvas-item"
-                    classList={{ active: view() === "canvas" && canvasPath() === c }}
-                    onClick={(e) => (e.ctrlKey ? void openInNewTab(c) : openCanvas(c))}
-                    onAuxClick={(e) => e.button === 1 && void openInNewTab(c)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      openCtx(e, fileMenu(c));
-                    }}
-                  >
-                    {c.replace(/\.canvas$/i, "")}
-                    <span class="canvas-badge">CANVAS</span>
-                  </div>
-                )}
-              </For>
-            </Show>
           </div>
         </Show>
       </aside>
@@ -2516,6 +2500,8 @@ export default function App() {
       <Show when={ctxMenu()}>
         {(m) => <ContextMenu anchor={m()} onClose={() => setCtxMenu(null)} />}
       </Show>
+
+      <DragGhost />
     </div>
   );
 }

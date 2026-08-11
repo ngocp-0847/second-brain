@@ -7,7 +7,9 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api, type NoteMeta } from "./api";
-import { NOTE_DRAG_MIME } from "./dnd";
+// `dragging` của module dnd đổi tên: canvas đã có biến `dragging` riêng cho
+// việc kéo node trên bảng.
+import { dragging as draggingFile, setCanvasDropHandler } from "./dnd";
 import { createEditor, type EditorHandle } from "./editor";
 import {
   IconBold,
@@ -997,31 +999,16 @@ export function CanvasView(props: {
     });
 
   // ---- kéo note từ sidebar thả vào canvas ----
-  const [dropping, setDropping] = createSignal(false);
-  const notePathFrom = (e: DragEvent) =>
-    e.dataTransfer?.types.includes(NOTE_DRAG_MIME) ? e.dataTransfer.getData(NOTE_DRAG_MIME) : null;
-
-  const onDragOver = (e: DragEvent) => {
-    if (!e.dataTransfer?.types.includes(NOTE_DRAG_MIME)) return;
-    // preventDefault ở dragover mới là thứ cho phép thả — thiếu nó trình duyệt
-    // sẽ từ chối drop và không bao giờ bắn sự kiện onDrop.
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    setDropping(true);
-  };
-  const onDragLeave = (e: DragEvent) => {
-    // dragleave bắn cả khi con trỏ đi qua node con → chỉ tắt khi rời hẳn host.
-    if (e.relatedTarget instanceof Node && host.contains(e.relatedTarget)) return;
-    setDropping(false);
-  };
-  const onDrop = (e: DragEvent) => {
-    const path = notePathFrom(e);
-    setDropping(false);
-    if (!path) return;
-    e.preventDefault();
-    const w = toWorld(e.clientX, e.clientY);
-    addNoteNode(path, w.x, w.y);
-  };
+  // Thả note từ sidebar vào canvas: đi qua ./dnd (pointer event) chứ không phải
+  // HTML5 drag-and-drop — WebView2 ở app này không bắn dragstart. Host đánh dấu
+  // data-drop-canvas, dnd tìm bằng elementFromPoint rồi gọi handler này.
+  onMount(() => {
+    setCanvasDropHandler((path, cx, cy) => {
+      const w = toWorld(cx, cy);
+      addNoteNode(path, w.x, w.y);
+    });
+  });
+  onCleanup(() => setCanvasDropHandler(undefined));
 
   const removeCard = (id: string) =>
     mutate((d) => ({
@@ -1169,15 +1156,14 @@ export function CanvasView(props: {
     <div
       ref={host}
       class="canvas-host"
-      classList={{ placing: tool().kind !== "select", dropping: dropping() }}
+      // Đang kéo file từ sidebar → viền sáng cho biết thả được.
+      classList={{ placing: tool().kind !== "select", dropping: draggingFile() }}
+      data-drop-canvas
       onMouseDown={onBgDown}
       onMouseMove={onMove}
       onMouseUp={onUp}
       onWheel={onWheel}
       onDblClick={onDblClick}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
     >
       <div
         class="canvas-plane"
