@@ -10,6 +10,7 @@
 //   data-drop-dir="<đường/dẫn/folder>"   ("" = gốc vault)
 //   data-drop-canvas                      (thả để chèn card vào canvas)
 import { createSignal, Show } from "solid-js";
+import { IconCanvas, IconNoteCard } from "./icons";
 
 /** Ngưỡng px phải vượt qua mới coi là kéo — dưới ngưỡng vẫn là click mở note. */
 const THRESHOLD = 5;
@@ -35,6 +36,9 @@ export const dropDir = () => {
   const t = target();
   return t?.kind === "dir" ? t.dir : null;
 };
+
+/** File đang được nhấc lên — tree dùng để tô sáng đúng dòng nguồn. */
+export const dragPath = () => drag()?.path ?? null;
 
 export const dragging = () => drag() !== null;
 
@@ -81,6 +85,14 @@ export function beginDrag(e: PointerEvent, path: string, label: string) {
   const startY = e.clientY;
   let active = false;
 
+  // Giữ luồng pointer về đúng dòng này để không phần tử nào giành được giữa
+  // đường. Mất pointer giữa lúc kéo chính là thứ làm thả vào folder không ăn.
+  try {
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+  } catch {
+    // Pointer đã biến mất trước khi kịp capture — listener trên window vẫn đủ chạy.
+  }
+
   const move = (ev: PointerEvent) => {
     if (!active) {
       if (Math.abs(ev.clientX - startX) < THRESHOLD && Math.abs(ev.clientY - startY) < THRESHOLD) {
@@ -99,9 +111,13 @@ export function beginDrag(e: PointerEvent, path: string, label: string) {
   // là chốt thứ hai cho mọi phần tử tự nhận drag (ảnh, link) nằm trong dòng file.
   const stopNativeDrag = (ev: Event) => ev.preventDefault();
 
+  // Gọi lại lần hai là vô hại: drag() đã null nên thoát sớm ở dưới. Nhờ vậy mới
+  // dám nghe cả pointerup lẫn mouseup — bình thường cả hai đều bắn, cái sau
+  // không làm gì thêm.
   const finish = (drop: boolean) => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    window.removeEventListener("mouseup", up);
     window.removeEventListener("pointercancel", cancel);
     window.removeEventListener("dragstart", stopNativeDrag);
     const t = target();
@@ -114,14 +130,28 @@ export function beginDrag(e: PointerEvent, path: string, label: string) {
   };
 
   const up = () => finish(true);
-  // Bị hủy (WebView2 giành pointer, tab mất focus…) thì bỏ, đừng di chuyển file
-  // vào chỗ con trỏ tình cờ đang nằm.
-  const cancel = () => finish(false);
+  // pointercancel KHÔNG được coi là huỷ thao tác. WebView2 thu hồi pointer giữa
+  // lúc kéo vì lý do của riêng nó, và coi đó là huỷ chính là lý do thả vào folder
+  // không ăn ở bản trước. Đã rê tới được một chỗ thả thì ý người dùng đã rõ — vẫn
+  // thả. Chỉ bỏ khi chưa có đích nào, lúc đó không có gì để làm.
+  const cancel = () => finish(target() !== null);
 
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+  // Lưới an toàn: nếu WebView2 không bắn pointerup (đã thấy nó ăn bớt sự kiện
+  // pointer giữa lúc kéo) thì mouseup vẫn tới, thao tác thả không bị mất.
+  window.addEventListener("mouseup", up);
   window.addEventListener("pointercancel", cancel);
   window.addEventListener("dragstart", stopNativeDrag);
+}
+
+/** Dòng phụ trên bóng: thả bây giờ thì chuyện gì xảy ra. */
+function dropHint(t: DropTarget): string {
+  if (!t) return "Rê vào folder để di chuyển";
+  if (t.kind === "canvas") return "Thêm card vào canvas";
+  // Tên folder lấy đoạn cuối cho gọn; folder đó đồng thời cũng đang sáng lên
+  // trong cây nên không sợ lẫn giữa hai folder trùng tên ở hai nhánh.
+  return t.dir ? `Di chuyển vào "${t.dir.split("/").pop()}"` : "Đưa về gốc vault";
 }
 
 /** "Bóng" đi theo con trỏ trong lúc kéo. Render một lần ở App. */
@@ -129,8 +159,18 @@ export function DragGhost() {
   return (
     <Show when={drag()}>
       {(d) => (
-        <div class="drag-ghost" style={{ left: `${d().x + 12}px`, top: `${d().y + 12}px` }}>
-          {d().label}
+        <div
+          class="drag-ghost"
+          classList={{ "has-target": target() !== null }}
+          style={{ left: `${d().x + 14}px`, top: `${d().y + 14}px` }}
+        >
+          <Show when={d().path.toLowerCase().endsWith(".canvas")} fallback={<IconNoteCard />}>
+            <IconCanvas />
+          </Show>
+          <div class="drag-ghost-text">
+            <div class="drag-ghost-label">{d().label}</div>
+            <div class="drag-ghost-hint">{dropHint(target())}</div>
+          </div>
         </div>
       )}
     </Show>
