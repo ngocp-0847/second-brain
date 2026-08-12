@@ -1305,14 +1305,23 @@ details[open] > .tree-dir .tree-dir-arrow {
   display: none;
 }
 
+/* Thanh nổi phía trên card lúc đang gõ — cùng vị trí/hình dáng với .card-toolbar
+ * màu (hai cái loại trừ nhau nên không đụng nhau). Nổi ra ngoài card để chữ
+ * được dùng hết chỗ; vì vậy nó phải là con trực tiếp của .canvas-card, chỗ duy
+ * nhất không cắt nội dung. */
 .card-format {
+  position: absolute;
+  top: -44px;
+  left: 0;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding-bottom: var(--sp-xs);
-  margin-bottom: var(--sp-xs);
-  border-bottom: 1px solid var(--border);
-  flex: none;
+  padding: 6px var(--sp-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  cursor: default;
 }
 
 .card-format button {
@@ -1349,21 +1358,8 @@ details[open] > .tree-dir .tree-dir-arrow {
   color: var(--on-sticky);
 }
 
-/* Nền giấy nhớ là pastel ở CẢ HAI theme nên --hover (trắng/đen theo theme) sai
- * màu ở đây; pha thẳng từ --on-sticky để luôn ăn nhập với mực. */
-.canvas-sticky .card-format {
-  border-bottom-color: color-mix(in srgb, var(--on-sticky) 15%, transparent);
-}
-
-.canvas-sticky .card-format button {
-  color: var(--on-sticky);
-  opacity: 0.65;
-}
-
-.canvas-sticky .card-format button:hover {
-  background: color-mix(in srgb, var(--on-sticky) 8%, transparent);
-  opacity: 1;
-}
+/* Giấy nhớ là một shape, mà shape thì không còn thanh format — nên các rule pha
+ * màu mực cho .card-format trong giấy nhớ đã bỏ ở đây. */
 
 /* ---- markdown chỉ đọc trong card ---- */
 
