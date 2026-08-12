@@ -331,11 +331,23 @@ const ShapeGlyph = (props: { kind: ShapeKind }) => (
  *
  *  Chỉ commit khi đóng, KHÔNG commit theo từng phím: `mutate` tạo object node mới
  *  nên `<For>` sẽ dựng lại DOM của card và giết luôn EditorView đang gõ dở. */
+/** Thao tác format cho thanh nổi NGOÀI card gọi vào editor đang gõ.
+ *
+ *  Thanh không thể nằm trong CardEditor: nó bị .canvas-card-body /
+ *  .canvas-shape-body (overflow:hidden) cắt mất. Nên card tự vẽ thanh như con
+ *  trực tiếp của .canvas-card — giống .card-toolbar màu — và gọi vào đây. */
+export interface CardFormatApi {
+  wrap: (mark: string) => void;
+  prefix: (mark: string) => void;
+}
+
 function CardEditor(props: {
   text: string;
   getNotes: () => NoteMeta[];
   onOpenNote: (path: string) => void;
   onDone: (text: string) => void;
+  /** Nhận api lúc mount, `null` lúc unmount. Không truyền = không có thanh format. */
+  onApi?: (api: CardFormatApi | null) => void;
 }) {
   let host!: HTMLDivElement;
   let wrapper!: HTMLDivElement;
@@ -359,9 +371,13 @@ function CardEditor(props: {
     });
     handle.setContent(props.text);
     queueMicrotask(() => handle?.view.focus());
+    // wrap/prefix khai báo bên dưới: callback này chạy sau khi cả thân component
+    // đã chạy xong nên hai const đã có giá trị.
+    props.onApi?.({ wrap, prefix });
   });
 
   onCleanup(() => {
+    props.onApi?.(null);
     commit();
     handle?.destroy();
   });
@@ -404,29 +420,13 @@ function CardEditor(props: {
           commit();
         }
       }}
-      // Bấm ra ngoài card = xong. Nút format nằm trong wrapper nên không tính.
+      // Bấm ra ngoài card = xong. Thanh format nằm NGOÀI wrapper nên không thể
+      // dựa vào contains() nữa: nó giữ được editor nhờ preventDefault ở
+      // mousedown (focus không rời đi → focusout không bắn).
       onFocusOut={(e) => {
         if (!wrapper.contains(e.relatedTarget as Node | null)) commit();
       }}
     >
-      <div class="card-format" onMouseDown={(e) => e.preventDefault()}>
-        <button title="Đậm (**text**)" onClick={() => wrap("**")}>
-          <IconBold />
-        </button>
-        <button title="Nghiêng (*text*)" onClick={() => wrap("*")}>
-          <IconItalic />
-        </button>
-        <button title="Code (`text`)" onClick={() => wrap("`")}>
-          <IconCode />
-        </button>
-        <span class="card-format-sep" />
-        <button title="Heading (## )" onClick={() => prefix("## ")}>
-          <IconHeading />
-        </button>
-        <button title="Gạch đầu dòng (- )" onClick={() => prefix("- ")}>
-          <IconBullets />
-        </button>
-      </div>
       <div class="card-editor-host" ref={host} />
     </div>
   );
@@ -448,6 +448,9 @@ export function CanvasView(props: {
   // Tool đang chọn: "select" = pan/kéo như cũ; còn lại là chế độ đặt node (click hoặc kéo trên nền).
   const [tool, setTool] = createSignal<Tool>({ kind: "select" });
   const [lastShape, setLastShape] = createSignal<ShapeKind>("rect");
+  // Api format của card đang gõ, để thanh nổi bên ngoài card gọi vào. Mỗi lúc
+  // chỉ gõ được một card nên một signal là đủ.
+  const [fmtApi, setFmtApi] = createSignal<CardFormatApi | null>(null);
   const [shapeMenu, setShapeMenu] = createSignal(false);
   // Node đang mở bảng đổi shape trên card-toolbar (null = không mở).
   const [shapePick, setShapePick] = createSignal<string | null>(null);
@@ -1404,6 +1407,9 @@ export function CanvasView(props: {
                     text={n.text ?? ""}
                     getNotes={props.getNotes}
                     onOpenNote={props.onOpenNote}
+                    // Trong hình khối thì không có rich text: chỗ hẹp, thanh
+                    // format chỉ làm rối. Không truyền onApi = không có thanh.
+                    onApi={shaped() ? undefined : setFmtApi}
                     onDone={(text) => {
                       if (text !== (n.text ?? "")) {
                         mutate((d) => ({
@@ -1484,6 +1490,40 @@ export function CanvasView(props: {
                       <IconTrash />
                     </button>
                   </div>
+                </Show>
+                {/* Thanh format nổi phía trên card lúc đang gõ, đúng chỗ của
+                    toolbar màu (hai cái loại trừ nhau). Nổi lên thay vì nằm
+                    trong card để không ăn chỗ của chữ. Hình khối không có. */}
+                <Show when={editing() === n.id && !shaped() && fmtApi()}>
+                  {(api) => (
+                    <div
+                      class="card-format"
+                      onMouseDown={(e) => {
+                        // stopPropagation: không để mousedown bubble xuống
+                        // onCardDown mà kéo card đi. preventDefault: focus không
+                        // rời editor nên chữ đang gõ không bị commit.
+                        e.stopPropagation();
+                        e.preventDefault();
+                      }}
+                    >
+                      <button title="Đậm (**text**)" onClick={() => api().wrap("**")}>
+                        <IconBold />
+                      </button>
+                      <button title="Nghiêng (*text*)" onClick={() => api().wrap("*")}>
+                        <IconItalic />
+                      </button>
+                      <button title="Code (`text`)" onClick={() => api().wrap("`")}>
+                        <IconCode />
+                      </button>
+                      <span class="card-format-sep" />
+                      <button title="Heading (## )" onClick={() => api().prefix("## ")}>
+                        <IconHeading />
+                      </button>
+                      <button title="Gạch đầu dòng (- )" onClick={() => api().prefix("- ")}>
+                        <IconBullets />
+                      </button>
+                    </div>
+                  )}
                 </Show>
                 <Show when={selectedCard() === n.id && editing() !== n.id}>
                   <Handles />
