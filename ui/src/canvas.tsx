@@ -266,19 +266,23 @@ function CanvasImage(props: { path: string }) {
 const resolveColor = (c?: string) => (c ? (PALETTE[c] ?? (c.startsWith("#") ? c : null)) : null);
 const cardColor = (n: CanvasNode) => resolveColor(n.color);
 
-/** Lớp nền SVG của node có shape. Không dùng clip-path vì nó cắt mất card-toolbar + port. */
-function ShapeLayer(props: { node: CanvasNode; tint: string | null }) {
+/** Lớp nền SVG của node có shape. Không dùng clip-path vì nó cắt mất card-toolbar + port.
+ *
+ *  `h` là chiều cao ĐANG hiển thị (có thể lớn hơn node.height khi card đang cao
+ *  thêm theo chữ) — viewBox phải theo nó, không thì preserveAspectRatio="none"
+ *  sẽ kéo giãn hình. */
+function ShapeLayer(props: { node: CanvasNode; tint: string | null; h: number }) {
   const kind = () => props.node.shape as ShapeKind;
   const sticky = () => kind() === "sticky";
   const fill = () =>
     sticky() ? (props.tint ?? PALETTE["3"]) : props.tint ? `${props.tint}1a` : "var(--bg-panel)";
   const stroke = () => (sticky() ? "transparent" : (props.tint ?? "var(--border-card)"));
-  const d = () => shapePath(kind(), props.node.width, props.node.height);
-  const detail = () => shapeDetail(kind(), props.node.width, props.node.height);
+  const d = () => shapePath(kind(), props.node.width, props.h);
+  const detail = () => shapeDetail(kind(), props.node.width, props.h);
   return (
     <svg
       class="canvas-shape"
-      viewBox={`0 0 ${props.node.width} ${props.node.height}`}
+      viewBox={`0 0 ${props.node.width} ${props.h}`}
       preserveAspectRatio="none"
     >
       <path
@@ -348,6 +352,12 @@ function CardEditor(props: {
   onDone: (text: string) => void;
   /** Nhận api lúc mount, `null` lúc unmount. Không truyền = không có thanh format. */
   onApi?: (api: CardFormatApi | null) => void;
+  /** Số px chữ đang TRÀN khỏi khung nhìn (0 = vừa khít). Card dùng để tự cao
+   *  thêm đúng phần thiếu thay vì sinh thanh cuộn — xem CanvasView.liveH.
+   *  Đo phần tràn, không đo chiều cao tuyệt đối: CodeMirror đặt
+   *  `.cm-content { min-height: 100% }` nên chiều cao nội dung luôn ≥ khung, lấy
+   *  nó cộng padding sẽ nới card thêm một chút mỗi vòng đo → phình vô tận. */
+  onOverflow?: (px: number) => void;
 }) {
   let host!: HTMLDivElement;
   let wrapper!: HTMLDivElement;
@@ -374,6 +384,20 @@ function CardEditor(props: {
     // wrap/prefix khai báo bên dưới: callback này chạy sau khi cả thân component
     // đã chạy xong nên hai const đã có giá trị.
     props.onApi?.({ wrap, prefix });
+
+    // Theo dõi .cm-content thay vì bắt sự kiện gõ: nó đổi cao cả khi wrap lại vì
+    // card bị resize, không chỉ khi thêm chữ. ResizeObserver chạy sau layout nên
+    // số đo luôn là chiều cao đã wrap thật.
+    if (props.onOverflow) {
+      const content = host.querySelector(".cm-content") as HTMLElement | null;
+      if (content) {
+        const ro = new ResizeObserver(() =>
+          props.onOverflow!(host.scrollHeight - host.clientHeight),
+        );
+        ro.observe(content);
+        onCleanup(() => ro.disconnect());
+      }
+    }
   });
 
   onCleanup(() => {
@@ -451,6 +475,17 @@ export function CanvasView(props: {
   // Api format của card đang gõ, để thanh nổi bên ngoài card gọi vào. Mỗi lúc
   // chỉ gõ được một card nên một signal là đủ.
   const [fmtApi, setFmtApi] = createSignal<CardFormatApi | null>(null);
+  // Card đang gõ tự cao thêm theo số dòng (như Miro) nên chữ không bao giờ phải
+  // cuộn. Chiều cao mới KHÔNG ghi vào doc ngay: mutate() sinh object node mới →
+  // <For> dựng lại DOM của card → giết EditorView đang gõ dở. Giữ tạm ở đây,
+  // chỉ commit vào doc lúc đóng editor.
+  const [liveH, setLiveH] = createSignal<{ id: string; h: number } | null>(null);
+  /** Chiều cao ĐANG hiện của node — lớn hơn giá trị trong doc khi card đang gõ
+   *  nới ra theo chữ. Dùng ở cả card lẫn điểm nối để dây bám đúng mép. */
+  const shownH = (n: CanvasNode) => {
+    const l = liveH();
+    return l && l.id === n.id ? Math.max(n.height, l.h) : n.height;
+  };
   const [shapeMenu, setShapeMenu] = createSignal(false);
   // Node đang mở bảng đổi shape trên card-toolbar (null = không mở).
   const [shapePick, setShapePick] = createSignal<string | null>(null);
@@ -1088,8 +1123,9 @@ export function CanvasView(props: {
 
   /** Cạnh gần điểm (x,y) nhất của card, tính theo tỉ lệ so với tâm. */
   const nearestSide = (n: CanvasNode, x: number, y: number): Side => {
+    const h = shownH(n);
     const rx = (x - (n.x + n.width / 2)) / n.width;
-    const ry = (y - (n.y + n.height / 2)) / n.height;
+    const ry = (y - (n.y + h / 2)) / h;
     return Math.abs(rx) > Math.abs(ry) ? (rx < 0 ? "left" : "right") : ry < 0 ? "top" : "bottom";
   };
 
@@ -1098,8 +1134,9 @@ export function CanvasView(props: {
   const anchor = (nodeId: string, side?: string, towards?: { x: number; y: number }): Anchor => {
     const n = doc().nodes.find((x) => x.id === nodeId);
     if (!n) return { x: 0, y: 0, dx: 0, dy: 0 };
+    const h = shownH(n);
     const cx = n.x + n.width / 2;
-    const cy = n.y + n.height / 2;
+    const cy = n.y + h / 2;
     const s: Side =
       side === "left" || side === "right" || side === "top" || side === "bottom"
         ? side
@@ -1114,7 +1151,7 @@ export function CanvasView(props: {
       case "top":
         return { x: cx, y: n.y, dx: 0, dy: -1 };
       case "bottom":
-        return { x: cx, y: n.y + n.height, dx: 0, dy: 1 };
+        return { x: cx, y: n.y + h, dx: 0, dy: 1 };
     }
   };
 
@@ -1329,6 +1366,28 @@ export function CanvasView(props: {
             }
             // Node text có `shape` → nền là lớp SVG, card chỉ còn vai trò hit-box.
             const shaped = () => n.type === "text" && !!n.shape;
+            const cardH = () => shownH(n);
+            /** Chữ vừa xuống dòng và tràn khung: nới card đúng phần thiếu thay vì
+             *  để nó sinh thanh cuộn. Vòng sau ResizeObserver đo lại còn 0 nên
+             *  dừng — padding của shape khai bằng % là % BỀ RỘNG, không đổi theo
+             *  chiều cao, nên không có chuyện đuổi nhau. */
+            const onOverflow = (over: number) => {
+              if (over > 1) setLiveH({ id: n.id, h: cardH() + Math.ceil(over) });
+            };
+            /** Đóng editor: chốt cả chữ và chiều cao đã nới thành MỘT bước undo. */
+            const finishEdit = (text: string) => {
+              const h = cardH();
+              // Chỉ xoá phần của chính card này: editor mới (card khác) có thể đã
+              // kịp đo và đặt liveH trước khi cleanup của card cũ chạy.
+              setLiveH((l) => (l && l.id === n.id ? null : l));
+              if (text !== (n.text ?? "") || h !== n.height) {
+                mutate((d) => ({
+                  ...d,
+                  nodes: d.nodes.map((x) => (x.id === n.id ? { ...x, text, height: h } : x)),
+                }));
+              }
+              setEditing(null);
+            };
             // Chỉ 4 góc: 4 điểm giữa cạnh đã bị .canvas-port chiếm chỗ.
             const Handles = () => (
               <For each={["nw", "ne", "se", "sw"]}>
@@ -1410,15 +1469,8 @@ export function CanvasView(props: {
                     // Trong hình khối thì không có rich text: chỗ hẹp, thanh
                     // format chỉ làm rối. Không truyền onApi = không có thanh.
                     onApi={shaped() ? undefined : setFmtApi}
-                    onDone={(text) => {
-                      if (text !== (n.text ?? "")) {
-                        mutate((d) => ({
-                          ...d,
-                          nodes: d.nodes.map((x) => (x.id === n.id ? { ...x, text } : x)),
-                        }));
-                      }
-                      setEditing(null);
-                    }}
+                    onOverflow={onOverflow}
+                    onDone={finishEdit}
                   />
                 ) : (
                   <div class="canvas-text">
@@ -1443,7 +1495,7 @@ export function CanvasView(props: {
                   left: `${n.x}px`,
                   top: `${n.y}px`,
                   width: `${n.width}px`,
-                  height: `${n.height}px`,
+                  height: `${cardH()}px`,
                   // Node có shape: màu nằm trong SVG, không tô lên card.
                   ...(tint() && !shaped()
                     ? { "border-color": tint()!, background: `${tint()}1a` }
@@ -1556,7 +1608,7 @@ export function CanvasView(props: {
                     </div>
                   }
                 >
-                  <ShapeLayer node={n} tint={tint()} />
+                  <ShapeLayer node={n} tint={tint()} h={cardH()} />
                   <div class="canvas-shape-body" style={{ padding: SHAPE_INSET[n.shape!] }}>
                     <Content />
                   </div>

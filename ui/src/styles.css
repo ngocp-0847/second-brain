@@ -1281,10 +1281,30 @@ details[open] > .tree-dir .tree-dir-arrow {
   min-height: 0;
 }
 
+/* Card tự cao thêm theo chữ (xem CanvasView.liveH) nên gần như không bao giờ
+ * tràn. `auto` chỉ còn là lưới an toàn cho khung một dòng lúc chưa kịp nới —
+ * và thanh phải mảnh, đúng tỉ lệ với card nhỏ, chứ không dày như thanh trang. */
 .card-editor-host {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+.card-editor-host::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.card-editor-host::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+}
+
+/* Trong hình khối thì tuyệt đối không cuộn: chỗ hẹp, một thanh cuộn ở đó lấn
+ * hết chữ. Chữ dài làm hình cao thêm — như Miro. */
+.canvas-shape-body .card-editor-host {
+  overflow: hidden;
 }
 
 .card-editor-host .cm-editor {
