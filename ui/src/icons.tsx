@@ -79,6 +79,8 @@ export {
   Image as IconImage,
   CircleHelp as IconHelp,
   Redo2 as IconRedo,
+  Group as IconGroup,
+  Ungroup as IconUngroup,
 } from "lucide-solid";
 
 // IconUndo trùng tên với IconRestore (cùng là Undo2) nên export riêng cho rõ ý.

@@ -828,6 +828,13 @@ details[open] > .tree-dir .tree-dir-arrow {
   background:
     radial-gradient(circle, var(--canvas-dot) 1px, transparent 1px) 0 0 / 24px 24px,
     var(--bg);
+  /* Kéo trên nền = khoanh vùng chọn (pan bằng lăn chuột / Space+kéo / chuột giữa),
+     nên con trỏ là mũi tên chứ không phải bàn tay. */
+  cursor: default;
+}
+
+/* Giữ Space = tạm pan: đổi con trỏ cho khớp việc sắp làm. */
+.canvas-host.panning {
   cursor: grab;
 }
 
@@ -1097,6 +1104,7 @@ details[open] > .tree-dir .tree-dir-arrow {
   border-color: var(--accent-border);
 }
 
+/* Nhãn nổi phía trên khung, giống tên frame trên Miro và group của Obsidian. */
 .canvas-group-label {
   position: absolute;
   top: -24px;
@@ -1105,6 +1113,41 @@ details[open] > .tree-dir .tree-dir-arrow {
   font-weight: 600;
   color: var(--fg-muted);
   white-space: nowrap;
+  cursor: text;
+}
+
+.canvas-group-input {
+  width: calc(100% - 20px);
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--accent);
+  outline: none;
+  font-family: inherit;
+  color: var(--fg-strong);
+}
+
+/* Khoanh vùng chọn khi kéo trên nền */
+.canvas-marquee {
+  position: absolute;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  pointer-events: none;
+}
+
+/* Khung bao quanh nhiều item đang chọn; chỉ thanh công cụ bên trong bắt chuột */
+.canvas-selbox {
+  position: absolute;
+  outline: 1.5px dashed var(--accent);
+  outline-offset: 6px;
+  border-radius: var(--r-sm);
+  pointer-events: none;
+}
+
+.canvas-selbox .card-toolbar {
+  pointer-events: auto;
+  top: -50px;
 }
 
 .canvas-card:hover {
@@ -1167,12 +1210,31 @@ details[open] > .tree-dir .tree-dir-arrow {
 }
 
 .card-toolbar-btn:hover {
+  color: var(--fg-strong);
+}
+
+/* Chỉ nút phá huỷ mới đỏ lên — trước đây mọi nút trên thanh đều đỏ vì chỉ có
+   mỗi nút xoá. */
+.card-toolbar-btn.danger:hover {
   color: var(--danger);
 }
 
 .card-toolbar-btn svg {
   width: 17px;
   height: 17px;
+}
+
+/* Nút có cả icon lẫn chữ (Nhóm) */
+.card-toolbar-btn.wide {
+  gap: 5px;
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.card-toolbar-btn.wide:hover {
+  background: var(--hover);
 }
 
 .canvas-card:hover .canvas-del,

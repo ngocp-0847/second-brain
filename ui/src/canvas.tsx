@@ -17,6 +17,7 @@ import {
   IconCaret,
   IconCode,
   IconCursor,
+  IconGroup,
   IconHeading,
   IconHelp,
   IconImage,
@@ -27,6 +28,7 @@ import {
   IconTextCard,
   IconTrash,
   IconUndo,
+  IconUngroup,
 } from "./icons";
 import { Markdown } from "./markdown";
 
@@ -468,7 +470,14 @@ export function CanvasView(props: {
   const [oy, setOy] = createSignal(0);
   const [editing, setEditing] = createSignal<string | null>(null);
   const [selectedEdge, setSelectedEdge] = createSignal<string | null>(null);
-  const [selectedCard, setSelectedCard] = createSignal<string | null>(null);
+  // Chọn NHIỀU node: mảng id. `selectedCard` giữ đúng nghĩa cũ — "đang chọn duy
+  // nhất một node" — nên mọi toolbar/tay nắm bám vào nó không phải sửa gì: chọn
+  // từ 2 cái trở lên thì các bảng riêng của từng card tự ẩn, nhường cho thanh
+  // của cả vùng chọn.
+  const [selection, setSelection] = createSignal<string[]>([]);
+  const selectedCard = () => (selection().length === 1 ? selection()[0]! : null);
+  const isSelected = (id: string) => selection().includes(id);
+  const setSelectedCard = (id: string | null) => setSelection(id ? [id] : []);
   // Tool đang chọn: "select" = pan/kéo như cũ; còn lại là chế độ đặt node (click hoặc kéo trên nền).
   const [tool, setTool] = createSignal<Tool>({ kind: "select" });
   const [lastShape, setLastShape] = createSignal<ShapeKind>("rect");
@@ -493,6 +502,16 @@ export function CanvasView(props: {
   // Khung nét đứt xem trước khi kéo vẽ kích thước.
   const [draft, setDraft] = createSignal<Box | null>(null);
   let placeStart: { x: number; y: number } | null = null;
+  // Khoanh vùng chọn (kéo trên nền): khung đang kéo + vùng chọn có trước khi kéo
+  // để Shift+kéo cộng dồn thay vì thay thế.
+  const [marquee, setMarquee] = createSignal<Box | null>(null);
+  let marqueeStart: { x: number; y: number } | null = null;
+  let marqueeBase: string[] = [];
+  // Giữ Space = tạm chuyển sang pan, như Miro/Figma (chuột giữa cũng pan).
+  // Là signal chứ không phải biến thường để con trỏ đổi hình ngay khi bấm phím.
+  const [spaceHeld, setSpaceHeld] = createSignal(false);
+  // Group đang sửa nhãn (null = không sửa).
+  const [labelEdit, setLabelEdit] = createSignal<string | null>(null);
   // Lịch sử undo/redo: chồng ảnh chụp CanvasDoc (doc bất biến nên chụp = giữ tham chiếu).
   const [past, setPast] = createSignal<CanvasDoc[]>([]);
   const [future, setFuture] = createSignal<CanvasDoc[]>([]);
@@ -605,12 +624,34 @@ export function CanvasView(props: {
       else undo();
       return;
     }
+    // Ctrl/Cmd+G nhóm vùng chọn · thêm Shift để bỏ nhóm (như Miro).
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+      if (editing()) return;
+      e.preventDefault();
+      if (e.shiftKey) ungroupSelection();
+      else groupSelection();
+      return;
+    }
+    // Ctrl/Cmd+A chọn hết node trên bảng.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      if (editing()) return;
+      e.preventDefault();
+      setSelectedEdge(null);
+      setSelection(doc().nodes.map((n) => n.id));
+      return;
+    }
+    if (e.code === "Space") {
+      // Không preventDefault: chỉ đổi ý nghĩa của cú kéo chuột kế tiếp.
+      setSpaceHeld(true);
+      return;
+    }
     if (e.key === "Escape") {
       setLinking(null);
       cancelPlacing();
       setShapeMenu(false);
       setHelpOpen(false);
       setShapePick(null);
+      setLabelEdit(null);
       return;
     }
     if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -621,10 +662,18 @@ export function CanvasView(props: {
         edges: d.edges.filter((x) => x.id !== selectedEdge()),
       }));
       setSelectedEdge(null);
-    } else if (selectedCard()) {
-      removeCard(selectedCard()!);
-      setSelectedCard(null);
+    } else if (selection().length) {
+      removeNodes(selection());
     }
+  };
+
+  const onKeyUp = (e: KeyboardEvent) => {
+    if (e.code === "Space") setSpaceHeld(false);
+  };
+  // Alt+Tab lúc đang giữ Space thì keyup không bao giờ tới → cờ kẹt ở true và
+  // canvas cứ pan thay vì khoanh chọn. Mất focus là thả cờ.
+  const onBlurWindow = () => {
+    setSpaceHeld(false);
   };
 
   /** Ctrl+V: có file ảnh thì lưu vào assets/ rồi thêm card ảnh; không thì dán
@@ -669,9 +718,13 @@ export function CanvasView(props: {
     // không bao giờ được ghi nhận và listener sống mãi trên window — chính là
     // nguyên nhân dán vào note lại bị tạo card trong canvas đã đóng.
     window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlurWindow);
     window.addEventListener("paste", onPaste);
     onCleanup(() => {
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlurWindow);
       window.removeEventListener("paste", onPaste);
       if (saveTimer) clearTimeout(saveTimer); // đừng ghi đè file sau khi đã rời view
     });
@@ -718,24 +771,45 @@ export function CanvasView(props: {
     return t.kind === "shape" && t.shape === k;
   };
 
+  /** Chuột giữa hoặc giữ Space = pan (như Miro/Figma) — kể cả khi con trỏ đang
+   *  nằm trên card, vì card che gần hết bảng. Lăn chuột vẫn pan như cũ. */
+  const wantsPan = (e: MouseEvent) => e.button === 1 || spaceHeld();
+  const startPan = (e: MouseEvent) => {
+    e.preventDefault();
+    panning = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+  };
+
   const onBgDown = (e: MouseEvent) => {
     if (!isBackground(e.target)) return;
     setShapeMenu(false);
     setHelpOpen(false);
     setShapePick(null);
+    setLabelEdit(null);
     setSelectedEdge(null);
-    setSelectedCard(null);
     if (tool().kind !== "select") {
+      setSelectedCard(null);
       // Đang ở chế độ đặt: click = kích thước mặc định, kéo = vẽ theo bbox. Không pan.
       const w = toWorld(e.clientX, e.clientY);
       placeStart = { x: w.x, y: w.y };
       setDraft({ x: w.x, y: w.y, w: 0, h: 0 });
       return;
     }
-    panning = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
+    if (wantsPan(e)) return startPan(e);
+    if (e.button !== 0) return;
+    // Kéo trên nền = khoanh vùng chọn nhiều node. Shift = cộng dồn vào vùng đang chọn.
+    marqueeBase = e.shiftKey ? selection() : [];
+    if (!e.shiftKey) setSelectedCard(null);
+    const w = toWorld(e.clientX, e.clientY);
+    marqueeStart = { x: w.x, y: w.y };
+    setMarquee({ x: w.x, y: w.y, w: 0, h: 0 });
   };
+
+  /** Hai hình chữ nhật có chạm nhau không (khoanh vùng kiểu Miro: chạm là dính,
+   *  không cần bao trọn). */
+  const hits = (b: Box, n: CanvasNode) =>
+    b.x < n.x + n.width && b.x + b.w > n.x && b.y < n.y + shownH(n) && b.y + b.h > n.y;
   const onMove = (e: MouseEvent) => {
     if (resizing) {
       const w = toWorld(e.clientX, e.clientY);
@@ -750,6 +824,22 @@ export function CanvasView(props: {
         w: Math.abs(w.x - placeStart.x),
         h: Math.abs(w.y - placeStart.y),
       });
+      return;
+    }
+    if (marqueeStart) {
+      const w = toWorld(e.clientX, e.clientY);
+      const box = {
+        x: Math.min(marqueeStart.x, w.x),
+        y: Math.min(marqueeStart.y, w.y),
+        w: Math.abs(w.x - marqueeStart.x),
+        h: Math.abs(w.y - marqueeStart.y),
+      };
+      setMarquee(box);
+      // Tô sáng ngay trong lúc kéo chứ không đợi thả — thấy được mình đang vợt trúng gì.
+      const inside = doc()
+        .nodes.filter((n) => hits(box, n))
+        .map((n) => n.id);
+      setSelection([...new Set([...marqueeBase, ...inside])]);
       return;
     }
     const l = linking();
@@ -780,6 +870,11 @@ export function CanvasView(props: {
     endGesture();
     if (resizing) {
       resizing = null;
+      return;
+    }
+    if (marqueeStart) {
+      marqueeStart = null;
+      setMarquee(null);
       return;
     }
     if (placeStart) {
@@ -893,28 +988,43 @@ export function CanvasView(props: {
 
   // ---- kéo card (group kéo theo mọi node nằm trọn bên trong, giống Obsidian) ----
   let dragging: { id: string; dx: number; dy: number }[] | null = null;
+
+  /** Node nằm trọn trong khung group → thuộc group đó. JSON Canvas không có danh
+   *  sách thành viên: quan hệ là VỊ TRÍ, đúng như Obsidian. */
+  const inGroup = (m: CanvasNode, g: CanvasNode) =>
+    m.id !== g.id &&
+    m.x >= g.x &&
+    m.y >= g.y &&
+    m.x + m.width <= g.x + g.width &&
+    m.y + m.height <= g.y + g.height;
+
   const onCardDown = (e: MouseEvent, n: CanvasNode) => {
     if (editing() === n.id) return;
     e.stopPropagation();
+    if (wantsPan(e)) return startPan(e);
+    if (e.button !== 0) return;
     if (selectedCard() !== n.id) setShapePick(null);
     setSelectedEdge(null);
-    setSelectedCard(n.id);
-    const w = toWorld(e.clientX, e.clientY);
-    const grabbed = [n];
-    if (n.type === "group") {
-      for (const m of doc().nodes) {
-        if (
-          m.id !== n.id &&
-          m.x >= n.x &&
-          m.y >= n.y &&
-          m.x + m.width <= n.x + n.width &&
-          m.y + m.height <= n.y + n.height
-        ) {
-          grabbed.push(m);
-        }
-      }
+    setLabelEdit(null);
+    if (e.shiftKey) {
+      // Shift+bấm: thêm/bớt khỏi vùng chọn, không kéo luôn.
+      setSelection(
+        isSelected(n.id) ? selection().filter((id) => id !== n.id) : [...selection(), n.id],
+      );
+      return;
     }
-    dragging = grabbed.map((m) => ({ id: m.id, dx: w.x - m.x, dy: w.y - m.y }));
+    // Bấm vào một node ĐANG nằm trong vùng chọn nhiều → giữ nguyên vùng chọn để
+    // kéo cả cụm; bấm ra ngoài vùng chọn thì thu về đúng node đó.
+    if (!isSelected(n.id)) setSelectedCard(n.id);
+    const w = toWorld(e.clientX, e.clientY);
+    const seeds = isSelected(n.id) ? doc().nodes.filter((m) => isSelected(m.id)) : [n];
+    const grabbed = new Map<string, CanvasNode>();
+    for (const s of seeds) {
+      grabbed.set(s.id, s);
+      if (s.type !== "group") continue;
+      for (const m of doc().nodes) if (inGroup(m, s)) grabbed.set(m.id, m);
+    }
+    dragging = [...grabbed.values()].map((m) => ({ id: m.id, dx: w.x - m.x, dy: w.y - m.y }));
   };
 
   const startLink = (e: MouseEvent, n: CanvasNode, side: Side) => {
@@ -1048,17 +1158,86 @@ export function CanvasView(props: {
   });
   onCleanup(() => setCanvasDropHandler(undefined));
 
-  const removeCard = (id: string) =>
+  const removeNodes = (ids: string[]) => {
+    if (!ids.length) return;
+    const gone = new Set(ids);
     mutate((d) => ({
-      nodes: d.nodes.filter((n) => n.id !== id),
-      edges: d.edges.filter((e) => e.fromNode !== id && e.toNode !== id),
+      nodes: d.nodes.filter((n) => !gone.has(n.id)),
+      edges: d.edges.filter((e) => !gone.has(e.fromNode) && !gone.has(e.toNode)),
     }));
+    setSelection((s) => s.filter((id) => !gone.has(id)));
+  };
+  const removeCard = (id: string) => removeNodes([id]);
 
-  const setColor = (id: string, color: string | undefined) =>
+  // ---- nhóm: khung bao quanh nhiều item, kéo khung là cả cụm đi theo ----
+  /** Lề giữa mép khung và item bên trong. */
+  const GROUP_PAD = 24;
+
+  /** Bbox bao ngoài một tập node (dùng cho nhóm và cho khung vùng chọn). */
+  const bboxOf = (ns: CanvasNode[]): Box | null => {
+    if (!ns.length) return null;
+    const x = Math.min(...ns.map((n) => n.x));
+    const y = Math.min(...ns.map((n) => n.y));
+    return {
+      x,
+      y,
+      w: Math.max(...ns.map((n) => n.x + n.width)) - x,
+      h: Math.max(...ns.map((n) => n.y + shownH(n))) - y,
+    };
+  };
+
+  const selectedNodes = () => doc().nodes.filter((n) => isSelected(n.id));
+
+  /** Gom các item đang chọn vào một khung nhóm mới.
+   *
+   *  Nhóm ở đây là node `type: "group"` của JSON Canvas nên Obsidian mở file vẫn
+   *  thấy đúng khung — không phải khái niệm riêng của app. Vì spec không có danh
+   *  sách thành viên, "thuộc nhóm" nghĩa là NẰM TRONG khung: kéo card ra ngoài
+   *  là tự rời nhóm, kéo vào là tự vào nhóm. */
+  const groupSelection = () => {
+    const ns = selectedNodes();
+    if (ns.length < 2) return;
+    const b = bboxOf(ns)!;
+    const id = uid();
+    const group: CanvasNode = {
+      id,
+      type: "group",
+      x: Math.round(b.x - GROUP_PAD),
+      y: Math.round(b.y - GROUP_PAD),
+      width: Math.round(b.w + GROUP_PAD * 2),
+      height: Math.round(b.h + GROUP_PAD * 2),
+      label: "Nhóm",
+    };
+    // Đặt ĐẦU mảng: z-order chạy theo thứ tự mảng nên nhóm nằm dưới các item bên
+    // trong, đúng cách Obsidian ghi file.
+    mutate((d) => ({ ...d, nodes: [group, ...d.nodes] }));
+    setSelectedCard(id);
+    setLabelEdit(id);
+  };
+
+  /** Bỏ khung nhóm đang chọn — item bên trong ở nguyên chỗ, chỉ mất khung. */
+  const ungroupSelection = () => {
+    const ids = selectedNodes()
+      .filter((n) => n.type === "group")
+      .map((n) => n.id);
+    removeNodes(ids);
+  };
+
+  const setLabel = (id: string, label: string) =>
     mutate((d) => ({
       ...d,
-      nodes: d.nodes.map((n) => (n.id === id ? { ...n, color } : n)),
+      nodes: d.nodes.map((n) => (n.id === id ? { ...n, label } : n)),
     }));
+
+  /** Đổi màu nhiều node trong MỘT bước undo (thanh của vùng chọn dùng tới). */
+  const setColorMany = (ids: string[], color: string | undefined) => {
+    const set = new Set(ids);
+    mutate((d) => ({
+      ...d,
+      nodes: d.nodes.map((n) => (set.has(n.id) ? { ...n, color } : n)),
+    }));
+  };
+  const setColor = (id: string, color: string | undefined) => setColorMany([id], color);
 
   /** Đổi shape của node text đã vẽ; `undefined` = trả về card chữ nhật thường. */
   const setShape = (id: string, shape: ShapeKind | undefined) =>
@@ -1197,7 +1376,11 @@ export function CanvasView(props: {
       ref={host}
       class="canvas-host"
       // Đang kéo file từ sidebar → viền sáng cho biết thả được.
-      classList={{ placing: tool().kind !== "select", dropping: draggingFile() }}
+      classList={{
+        placing: tool().kind !== "select",
+        dropping: draggingFile(),
+        panning: spaceHeld(),
+      }}
       data-drop-canvas
       onMouseDown={onBgDown}
       onMouseMove={onMove}
@@ -1309,7 +1492,7 @@ export function CanvasView(props: {
                 <div
                   class="canvas-group"
                   data-node-id={n.id}
-                  classList={{ selected: selectedCard() === n.id }}
+                  classList={{ selected: isSelected(n.id) }}
                   style={{
                     left: `${n.x}px`,
                     top: `${n.y}px`,
@@ -1340,8 +1523,22 @@ export function CanvasView(props: {
                       <span class="card-toolbar-sep" />
                       <button
                         class="card-toolbar-btn"
-                        title="Xóa group (Delete)"
+                        title="Bỏ nhóm — giữ lại item bên trong (Ctrl+Shift+G)"
                         onClick={() => removeCard(n.id)}
+                      >
+                        <IconUngroup />
+                      </button>
+                      <button
+                        class="card-toolbar-btn danger"
+                        title="Xóa cả nhóm lẫn item bên trong"
+                        onClick={() =>
+                          removeNodes([
+                            n.id,
+                            ...doc()
+                              .nodes.filter((m) => inGroup(m, n))
+                              .map((m) => m.id),
+                          ])
+                        }
                       >
                         <IconTrash />
                       </button>
@@ -1358,9 +1555,48 @@ export function CanvasView(props: {
                       )}
                     </For>
                   </Show>
-                  <span class="canvas-group-label" style={tint() ? { color: tint()! } : {}}>
-                    {n.label || "Group"}
-                  </span>
+                  {/* Nhãn nhóm: double-click để đặt tên, như tên frame trên Miro. */}
+                  <Show
+                    when={labelEdit() === n.id}
+                    fallback={
+                      <span
+                        class="canvas-group-label"
+                        style={tint() ? { color: tint()! } : {}}
+                        title="Double-click để đổi tên nhóm"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onDblClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedCard(n.id);
+                          setLabelEdit(n.id);
+                        }}
+                      >
+                        {n.label || "Nhóm"}
+                      </span>
+                    }
+                  >
+                    <input
+                      class="canvas-group-label canvas-group-input"
+                      value={n.label ?? ""}
+                      placeholder="Tên nhóm"
+                      // Focus phải đặt sau khi input đã vào DOM, nên hoãn một nhịp.
+                      ref={(el) =>
+                        queueMicrotask(() => {
+                          el.focus();
+                          el.select();
+                        })
+                      }
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        e.stopPropagation(); // Delete/Escape ở đây là của ô chữ, không phải của canvas
+                        if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+                      }}
+                      onBlur={(e) => {
+                        const v = e.currentTarget.value.trim();
+                        if (v !== (n.label ?? "")) setLabel(n.id, v);
+                        setLabelEdit(null);
+                      }}
+                    />
+                  </Show>
                 </div>
               );
             }
@@ -1488,7 +1724,7 @@ export function CanvasView(props: {
                   "canvas-file": n.type === "file",
                   "canvas-shaped": shaped(),
                   "canvas-sticky": n.shape === "sticky",
-                  selected: selectedCard() === n.id,
+                  selected: isSelected(n.id),
                 }}
                 data-node-id={n.id}
                 style={{
@@ -1535,7 +1771,7 @@ export function CanvasView(props: {
                     </Show>
                     <span class="card-toolbar-sep" />
                     <button
-                      class="card-toolbar-btn"
+                      class="card-toolbar-btn danger"
                       title="Xóa card (Delete)"
                       onClick={() => removeCard(n.id)}
                     >
@@ -1644,6 +1880,78 @@ export function CanvasView(props: {
             );
           }}
         </Show>
+        {/* Khung đang khoanh vùng chọn */}
+        <Show when={marquee()}>
+          {(m) => (
+            <div
+              class="canvas-marquee"
+              style={{
+                left: `${m().x}px`,
+                top: `${m().y}px`,
+                width: `${m().w}px`,
+                height: `${m().h}px`,
+              }}
+            />
+          )}
+        </Show>
+        {/* Chọn từ 2 item trở lên: khung bao chung + thanh Nhóm/Xóa (từng card
+            không hiện toolbar riêng nữa vì selectedCard() lúc này là null). */}
+        <Show when={selection().length > 1 && bboxOf(selectedNodes())}>
+          {(b) => (
+            <div
+              class="canvas-selbox"
+              style={{
+                left: `${b().x}px`,
+                top: `${b().y}px`,
+                width: `${b().w}px`,
+                height: `${b().h}px`,
+              }}
+            >
+              <div class="card-toolbar" onMouseDown={(e) => e.stopPropagation()}>
+                <button
+                  class="card-toolbar-btn wide"
+                  title="Nhóm các item đang chọn vào một khung (Ctrl+G)"
+                  onClick={groupSelection}
+                >
+                  <IconGroup /> Nhóm
+                </button>
+                <Show when={selectedNodes().some((n) => n.type === "group")}>
+                  <button
+                    class="card-toolbar-btn"
+                    title="Bỏ khung nhóm đang chọn (Ctrl+Shift+G)"
+                    onClick={ungroupSelection}
+                  >
+                    <IconUngroup />
+                  </button>
+                </Show>
+                <span class="card-toolbar-sep" />
+                <For each={Object.entries(PALETTE)}>
+                  {([key, hex]) => (
+                    <button
+                      class="color-dot"
+                      style={{ background: hex }}
+                      title={`Màu ${key} cho mọi item đang chọn`}
+                      onClick={() => setColorMany(selection(), key)}
+                    />
+                  )}
+                </For>
+                <button
+                  class="color-dot none"
+                  title="Bỏ màu"
+                  onClick={() => setColorMany(selection(), undefined)}
+                />
+                <span class="card-toolbar-sep" />
+                <button
+                  class="card-toolbar-btn danger"
+                  title="Xóa mọi item đang chọn (Delete)"
+                  onClick={() => removeNodes(selection())}
+                >
+                  <IconTrash />
+                </button>
+              </div>
+            </div>
+          )}
+        </Show>
       </div>
       <div class="canvas-toolbar" onMouseDown={(e) => e.stopPropagation()}>
         <button
@@ -1744,6 +2052,17 @@ export function CanvasView(props: {
               </div>
               <div>
                 <b>Double-click nền</b> tạo card text · <b>Ctrl+V</b> dán ảnh
+              </div>
+              <div>
+                <b>Kéo trên nền</b> khoanh chọn nhiều · <b>Shift+bấm</b> thêm/bớt ·{" "}
+                <b>Ctrl+A</b> chọn hết
+              </div>
+              <div>
+                <b>Ctrl+G</b> nhóm vùng chọn · <b>Ctrl+Shift+G</b> bỏ nhóm ·{" "}
+                <b>double-click nhãn</b> đổi tên nhóm
+              </div>
+              <div>
+                <b>Space+kéo</b> hoặc <b>kéo chuột giữa</b> để pan
               </div>
               <div>Kéo từ chấm tròn mép card để nối · chọn edge rồi kéo 2 đầu để nối lại</div>
               <div>Chọn node rồi kéo ô vuông ở 4 góc để đổi kích thước</div>
