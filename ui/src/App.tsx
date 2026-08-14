@@ -1672,6 +1672,10 @@ export default function App() {
         setAnswer(null);
         queueMicrotask(() => omniInput?.focus());
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+        // Đang mở canvas thì Ctrl+G là "nhóm item đang chọn" (canvas.tsx tự xử
+        // lý) — nhường phím, không bật graph view. Hai listener cùng nằm trên
+        // window nên nếu không nhường ở đây thì cả hai cùng chạy.
+        if (view() === "canvas") return;
         e.preventDefault();
         toggleGraph();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
