@@ -12,24 +12,40 @@ import { api, type NoteMeta } from "./api";
 import { dragging as draggingFile, setCanvasDropHandler } from "./dnd";
 import { createEditor, type EditorHandle } from "./editor";
 import {
+  IconArrange,
   IconBold,
+  IconBringForward,
+  IconBringFront,
   IconBullets,
   IconCaret,
   IconCode,
+  IconCopy,
   IconCursor,
+  IconDuplicate,
+  IconFit,
   IconGroup,
   IconHeading,
   IconHelp,
   IconImage,
   IconItalic,
   IconLink,
+  IconLock,
   IconNoteCard,
+  IconOpenExternal,
+  IconOpenNewTab,
+  IconPaste,
   IconRedo,
+  IconRename,
+  IconSelectAll,
+  IconSendBack,
+  IconSendBackward,
   IconTextCard,
   IconTrash,
   IconUndo,
   IconUngroup,
+  IconUnlock,
 } from "./icons";
+import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { Markdown } from "./markdown";
 
 export type ShapeKind =
@@ -60,6 +76,9 @@ export interface CanvasNode {
   color?: string;
   /** Ngoài spec JSON Canvas 1.0 — Obsidian bỏ qua, node hiện thành card chữ nhật. */
   shape?: ShapeKind;
+  /** Ngoài spec: khoá không cho kéo/đổi cỡ/sửa. Obsidian bỏ qua field lạ nên
+   *  file vẫn mở được bình thường, chỉ là bên đó không khoá. */
+  lock?: boolean;
 }
 
 export interface CanvasEdge {
@@ -392,9 +411,17 @@ function CardEditor(props: {
     // số đo luôn là chiều cao đã wrap thật.
     if (props.onOverflow) {
       const content = host.querySelector(".cm-content") as HTMLElement | null;
+      const scroller = handle.view.scrollDOM;
       if (content) {
+        // Đo cả hai chỗ có thể ôm phần tràn: .card-editor-host và scroller của
+        // CM. Chỉ đo một chỗ là hụt — tuỳ CSS mà chỗ kia mới là chỗ cuộn.
         const ro = new ResizeObserver(() =>
-          props.onOverflow!(host.scrollHeight - host.clientHeight),
+          props.onOverflow!(
+            Math.max(
+              host.scrollHeight - host.clientHeight,
+              scroller.scrollHeight - scroller.clientHeight,
+            ),
+          ),
         );
         ro.observe(content);
         onCleanup(() => ro.disconnect());
@@ -632,12 +659,28 @@ export function CanvasView(props: {
       else groupSelection();
       return;
     }
+    // Ctrl/Cmd+C sao chép · Ctrl/Cmd+D nhân đôi vùng chọn.
+    if ((e.ctrlKey || e.metaKey) && /^[cd]$/i.test(e.key) && !e.shiftKey) {
+      if (editing() || !selection().length) return;
+      e.preventDefault();
+      if (e.key.toLowerCase() === "c") copySelection();
+      else duplicateSelection();
+      return;
+    }
+    // PgUp/PgDn đổi lớp, thêm Shift là một bậc (đúng bộ phím của Miro).
+    if (e.key === "PageUp" || e.key === "PageDown") {
+      if (editing() || !selection().length) return;
+      e.preventDefault();
+      const up = e.key === "PageUp";
+      arrange(e.shiftKey ? (up ? "forward" : "backward") : up ? "front" : "back");
+      return;
+    }
     // Ctrl/Cmd+A chọn hết node trên bảng.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
       if (editing()) return;
       e.preventDefault();
       setSelectedEdge(null);
-      setSelection(doc().nodes.map((n) => n.id));
+      selectAll();
       return;
     }
     if (e.code === "Space") {
@@ -685,8 +728,14 @@ export function CanvasView(props: {
       const text = e.clipboardData?.getData("text/plain")?.replace(/\r\n/g, "\n").trim();
       if (!text) return;
       e.preventDefault();
-      const rect = host.getBoundingClientRect();
-      const c = toWorld(rect.left + host.clientWidth / 2, rect.top + host.clientHeight / 2);
+      const c = viewCenter();
+      // Chữ trong clipboard là payload node do chính app copy ra? Thì dán lại
+      // thành node chứ không phải một card chứa đoạn JSON.
+      const clip = parseClip(text);
+      if (clip) {
+        pasteClip(clip, c.x, c.y);
+        return;
+      }
       const [w, h] = textCardSize(text);
       createNode(null, { x: c.x - w / 2, y: c.y - h / 2, w, h }, text);
       return;
@@ -807,9 +856,14 @@ export function CanvasView(props: {
   };
 
   /** Hai hình chữ nhật có chạm nhau không (khoanh vùng kiểu Miro: chạm là dính,
-   *  không cần bao trọn). */
+   *  không cần bao trọn). Item khoá không dính vào lưới quét — muốn đụng tới nó
+   *  thì bấm thẳng vào, rồi mở khoá bằng menu chuột phải. */
   const hits = (b: Box, n: CanvasNode) =>
-    b.x < n.x + n.width && b.x + b.w > n.x && b.y < n.y + shownH(n) && b.y + b.h > n.y;
+    !n.lock &&
+    b.x < n.x + n.width &&
+    b.x + b.w > n.x &&
+    b.y < n.y + shownH(n) &&
+    b.y + b.h > n.y;
   const onMove = (e: MouseEvent) => {
     if (resizing) {
       const w = toWorld(e.clientX, e.clientY);
@@ -1016,15 +1070,13 @@ export function CanvasView(props: {
     // Bấm vào một node ĐANG nằm trong vùng chọn nhiều → giữ nguyên vùng chọn để
     // kéo cả cụm; bấm ra ngoài vùng chọn thì thu về đúng node đó.
     if (!isSelected(n.id)) setSelectedCard(n.id);
+    if (n.lock) return; // khoá: chọn được để mở menu, nhưng không kéo đi
     const w = toWorld(e.clientX, e.clientY);
     const seeds = isSelected(n.id) ? doc().nodes.filter((m) => isSelected(m.id)) : [n];
-    const grabbed = new Map<string, CanvasNode>();
-    for (const s of seeds) {
-      grabbed.set(s.id, s);
-      if (s.type !== "group") continue;
-      for (const m of doc().nodes) if (inGroup(m, s)) grabbed.set(m.id, m);
-    }
-    dragging = [...grabbed.values()].map((m) => ({ id: m.id, dx: w.x - m.x, dy: w.y - m.y }));
+    // Item khoá bị loại khỏi cú kéo, kể cả khi nó nằm trong nhóm đang kéo.
+    dragging = withGroupChildren(seeds)
+      .filter((m) => !m.lock)
+      .map((m) => ({ id: m.id, dx: w.x - m.x, dy: w.y - m.y }));
   };
 
   const startLink = (e: MouseEvent, n: CanvasNode, side: Side) => {
@@ -1188,6 +1240,14 @@ export function CanvasView(props: {
 
   const selectedNodes = () => doc().nodes.filter((n) => isSelected(n.id));
 
+  /** Chọn hết — trừ item đang khoá, giống lưới quét. */
+  const selectAll = () =>
+    setSelection(
+      doc()
+        .nodes.filter((n) => !n.lock)
+        .map((n) => n.id),
+    );
+
   /** Gom các item đang chọn vào một khung nhóm mới.
    *
    *  Nhóm ở đây là node `type: "group"` của JSON Canvas nên Obsidian mở file vẫn
@@ -1223,11 +1283,301 @@ export function CanvasView(props: {
     removeNodes(ids);
   };
 
+  /** Tập node kèm mọi item nằm trong khung của các group có trong tập đó, trả về
+   *  THEO THỨ TỰ MẢNG doc để giữ nguyên z-order khi nhân bản/sao chép. */
+  const withGroupChildren = (ns: CanvasNode[]) => {
+    const ids = new Set(ns.map((n) => n.id));
+    for (const g of ns) {
+      if (g.type !== "group") continue;
+      for (const m of doc().nodes) if (inGroup(m, g)) ids.add(m.id);
+    }
+    return doc().nodes.filter((n) => ids.has(n.id));
+  };
+
+  // ---- sắp xếp lớp (arrange) ----
+  // JSON Canvas không có field z-index: thứ tự MẢNG chính là z-order, phần tử
+  // sau nằm trên. Nên mọi thao tác lớp ở đây là hoán vị mảng nodes.
+  type Arrange = "front" | "back" | "forward" | "backward";
+  const arrange = (mode: Arrange) => {
+    // Đổi lớp một khung nhóm phải kéo theo item bên trong, không thì khung trồi
+    // lên che mất chính nội dung của nó.
+    const ids = new Set(withGroupChildren(selectedNodes()).map((n) => n.id));
+    if (!ids.size) return;
+    mutate((d) => {
+      const nodes = [...d.nodes];
+      if (mode === "front" || mode === "back") {
+        const picked = nodes.filter((n) => ids.has(n.id));
+        const rest = nodes.filter((n) => !ids.has(n.id));
+        // Trong cụm được nhấc, khung nhóm luôn xuống dưới cùng.
+        const ordered = [
+          ...picked.filter((n) => n.type === "group"),
+          ...picked.filter((n) => n.type !== "group"),
+        ];
+        return { ...d, nodes: mode === "front" ? [...rest, ...ordered] : [...ordered, ...rest] };
+      }
+      // Lên/xuống MỘT bậc. Duyệt xuôi hay ngược tuỳ hướng để nhiều node cùng
+      // chọn không nhảy chồng lên nhau; chỉ đổi chỗ khi hàng xóm không cùng
+      // được chọn, nhờ vậy cả cụm giữ nguyên thứ tự nội bộ.
+      if (mode === "forward") {
+        for (let i = nodes.length - 2; i >= 0; i--) {
+          if (ids.has(nodes[i].id) && !ids.has(nodes[i + 1].id)) {
+            [nodes[i], nodes[i + 1]] = [nodes[i + 1], nodes[i]];
+          }
+        }
+      } else {
+        for (let i = 1; i < nodes.length; i++) {
+          if (ids.has(nodes[i].id) && !ids.has(nodes[i - 1].id)) {
+            [nodes[i], nodes[i - 1]] = [nodes[i - 1], nodes[i]];
+          }
+        }
+      }
+      return { ...d, nodes };
+    });
+  };
+
+  // ---- sao chép / nhân đôi / dán ----
+  /** Nhãn nhận diện payload của app trong clipboard hệ thống. */
+  const CLIP_KIND = "second-brain/canvas";
+  type Clip = { nodes: CanvasNode[]; edges: CanvasEdge[] };
+  // Bản sao trong bộ nhớ: dùng cho menu "Dán" và làm phương án dự phòng khi
+  // WebView2 không cho ghi clipboard hệ thống.
+  let clipboard: Clip | null = null;
+
+  /** Nhân bản một tập node kèm các edge nằm TRỌN trong tập đó, dời (dx, dy). */
+  const cloneNodes = (c: Clip, dx: number, dy: number): Clip => {
+    const idMap = new Map(c.nodes.map((n) => [n.id, uid()]));
+    return {
+      nodes: c.nodes.map((n) => ({
+        ...n,
+        id: idMap.get(n.id)!,
+        x: Math.round(n.x + dx),
+        y: Math.round(n.y + dy),
+      })),
+      edges: c.edges
+        .filter((e) => idMap.has(e.fromNode) && idMap.has(e.toNode))
+        .map((e) => ({
+          ...e,
+          id: uid(),
+          fromNode: idMap.get(e.fromNode)!,
+          toNode: idMap.get(e.toNode)!,
+        })),
+    };
+  };
+
+  /** Vùng chọn (kèm item trong nhóm) + các edge nối giữa chúng. */
+  const selectionClip = (): Clip | null => {
+    const nodes = withGroupChildren(selectedNodes());
+    if (!nodes.length) return null;
+    const ids = new Set(nodes.map((n) => n.id));
+    return { nodes, edges: doc().edges.filter((e) => ids.has(e.fromNode) && ids.has(e.toNode)) };
+  };
+
+  /** Chuỗi trong clipboard có phải payload node của app không. */
+  const parseClip = (text: string): Clip | null => {
+    if (!text.startsWith("{")) return null; // khỏi parse cả đoạn văn dài
+    try {
+      const j = JSON.parse(text);
+      if (j?.kind !== CLIP_KIND || !Array.isArray(j.nodes) || !j.nodes.length) return null;
+      return { nodes: j.nodes, edges: Array.isArray(j.edges) ? j.edges : [] };
+    } catch {
+      return null;
+    }
+  };
+
+  const copySelection = () => {
+    const c = selectionClip();
+    if (!c) return;
+    clipboard = c;
+    // Ghi luôn ra clipboard hệ thống: Ctrl+V đi qua sự kiện `paste`, chỉ đọc
+    // được clipboard hệ thống chứ không thấy biến trên. Hỏng thì bỏ qua — menu
+    // "Dán" vẫn chạy nhờ bản trong bộ nhớ.
+    void navigator.clipboard
+      ?.writeText(JSON.stringify({ kind: CLIP_KIND, ...c }))
+      .catch(() => {});
+  };
+
+  /** Thả một clip xuống bảng, tâm đặt tại (wx, wy) rồi chọn luôn bản mới. */
+  const pasteClip = (c: Clip, wx: number, wy: number) => {
+    const b = bboxOf(c.nodes);
+    if (!b) return;
+    const fresh = cloneNodes(c, wx - (b.x + b.w / 2), wy - (b.y + b.h / 2));
+    mutate((d) => ({
+      nodes: [...d.nodes, ...fresh.nodes],
+      edges: [...d.edges, ...fresh.edges],
+    }));
+    setSelection(fresh.nodes.map((n) => n.id));
+  };
+
+  /** Tâm viewport trong toạ độ world — chỗ dán mặc định. */
+  const viewCenter = () => {
+    const rect = host.getBoundingClientRect();
+    return toWorld(rect.left + host.clientWidth / 2, rect.top + host.clientHeight / 2);
+  };
+
+  const duplicateSelection = () => {
+    const c = selectionClip();
+    if (!c) return;
+    const fresh = cloneNodes(c, 24, 24);
+    mutate((d) => ({
+      nodes: [...d.nodes, ...fresh.nodes],
+      edges: [...d.edges, ...fresh.edges],
+    }));
+    setSelection(fresh.nodes.map((n) => n.id));
+  };
+
+  /** Khoá/mở khoá: còn cái nào chưa khoá thì khoá hết, ngược lại mở hết. */
+  const toggleLock = (ids: string[]) => {
+    const set = new Set(ids);
+    const lock = doc().nodes.some((n) => set.has(n.id) && !n.lock);
+    mutate((d) => ({
+      ...d,
+      nodes: d.nodes.map((n) => {
+        if (!set.has(n.id)) return n;
+        const { lock: _drop, ...rest } = n;
+        return lock ? { ...rest, lock: true } : rest;
+      }),
+    }));
+  };
+
   const setLabel = (id: string, label: string) =>
     mutate((d) => ({
       ...d,
       nodes: d.nodes.map((n) => (n.id === id ? { ...n, label } : n)),
     }));
+
+  // ---- menu chuột phải ----
+  const [ctxMenu, setCtxMenu] = createSignal<MenuAnchor | null>(null);
+
+  const arrangeItems = (): MenuItem[] => [
+    {
+      label: "Đưa lên trên",
+      icon: IconBringForward,
+      shortcut: "Shift+PgUp",
+      onSelect: () => arrange("forward"),
+    },
+    {
+      label: "Lên trên cùng",
+      icon: IconBringFront,
+      shortcut: "PgUp",
+      onSelect: () => arrange("front"),
+    },
+    {
+      label: "Đưa xuống dưới",
+      icon: IconSendBackward,
+      shortcut: "Shift+PgDn",
+      onSelect: () => arrange("backward"),
+    },
+    {
+      label: "Xuống dưới cùng",
+      icon: IconSendBack,
+      shortcut: "PgDn",
+      onSelect: () => arrange("back"),
+    },
+  ];
+
+  /** Menu cho một node (đang chọn nhiều thì áp cho cả vùng chọn). */
+  const nodeMenu = (n: CanvasNode): MenuItem[] => {
+    const many = selection().length > 1;
+    const locked = selectedNodes().every((m) => m.lock);
+    const items: MenuItem[] = [
+      { label: "Sao chép", icon: IconCopy, shortcut: "Ctrl+C", onSelect: copySelection },
+      { label: "Nhân đôi", icon: IconDuplicate, shortcut: "Ctrl+D", onSelect: duplicateSelection },
+    ];
+    if (!many && !n.lock) {
+      if (n.type === "text") {
+        items.push({
+          label: "Sửa nội dung",
+          icon: IconRename,
+          shortcut: "Double-click",
+          onSelect: () => setEditing(n.id),
+        });
+      } else if (n.type === "group") {
+        items.push({ label: "Đổi tên nhóm", icon: IconRename, onSelect: () => setLabelEdit(n.id) });
+      } else if (n.type === "file" && n.file && !isImagePath(n.file)) {
+        items.push({
+          label: "Mở note",
+          icon: IconOpenNewTab,
+          onSelect: () => props.onOpenNote(n.file!),
+        });
+      } else if (n.type === "link" && n.url) {
+        items.push({
+          label: "Mở trong trình duyệt",
+          icon: IconOpenExternal,
+          onSelect: () => window.open(n.url, "_blank"),
+        });
+      }
+    }
+    items.push({ separator: true, label: "" }, { label: "Sắp xếp", icon: IconArrange, submenu: arrangeItems() });
+    if (many) {
+      items.push({ label: "Nhóm lại", icon: IconGroup, shortcut: "Ctrl+G", onSelect: groupSelection });
+    }
+    if (selectedNodes().some((m) => m.type === "group")) {
+      items.push({
+        label: "Bỏ nhóm",
+        icon: IconUngroup,
+        shortcut: "Ctrl+Shift+G",
+        onSelect: ungroupSelection,
+      });
+    }
+    items.push({
+      label: locked ? "Mở khoá" : "Khoá",
+      icon: locked ? IconUnlock : IconLock,
+      onSelect: () => toggleLock(selection()),
+    });
+    items.push(
+      { separator: true, label: "" },
+      {
+        label: many ? `Xoá ${selection().length} item` : "Xoá",
+        icon: IconTrash,
+        shortcut: "Delete",
+        danger: true,
+        onSelect: () => removeNodes(selection()),
+      },
+    );
+    return items;
+  };
+
+  /** Menu khi bấm phải lên nền trống. */
+  const bgMenu = (wx: number, wy: number): MenuItem[] => [
+    // "Dán" chỉ hiện khi thật sự có gì để dán — menu không có trạng thái mờ.
+    ...(clipboard
+      ? [
+          {
+            label: `Dán ${clipboard.nodes.length} item`,
+            icon: IconPaste,
+            shortcut: "Ctrl+V",
+            onSelect: () => clipboard && pasteClip(clipboard, wx, wy),
+          },
+        ]
+      : []),
+    { label: "Card text mới ở đây", icon: IconTextCard, onSelect: () => newTextCard(wx, wy) },
+    { separator: true, label: "" },
+    {
+      label: "Chọn hết",
+      icon: IconSelectAll,
+      shortcut: "Ctrl+A",
+      onSelect: selectAll,
+    },
+    { label: "Vừa khung hình", icon: IconFit, onSelect: fitView },
+  ];
+
+  const onCtxMenu = (e: MouseEvent) => {
+    // Đang gõ trong card thì nhường menu chữ của WebView (copy/paste/undo cho
+    // đoạn text) — menu canvas ở đó chẳng giúp được gì.
+    if (e.target instanceof Element && e.target.closest(".card-editor")) return;
+    e.preventDefault();
+    if (tool().kind !== "select") cancelPlacing();
+    setLabelEdit(null);
+    const el = e.target instanceof Element ? e.target.closest("[data-node-id]") : null;
+    const id = el?.getAttribute("data-node-id") ?? null;
+    const n = id ? doc().nodes.find((x) => x.id === id) : undefined;
+    // Bấm phải lên item ngoài vùng chọn thì chọn nó trước (như mọi trình khác);
+    // bấm phải vào item đang trong vùng chọn thì giữ nguyên cả vùng.
+    if (n && !isSelected(n.id)) setSelectedCard(n.id);
+    if (!n) setSelection([]);
+    const w = toWorld(e.clientX, e.clientY);
+    setCtxMenu({ x: e.clientX, y: e.clientY, items: n ? nodeMenu(n) : bgMenu(w.x, w.y) });
+  };
 
   /** Đổi màu nhiều node trong MỘT bước undo (thanh của vùng chọn dùng tới). */
   const setColorMany = (ids: string[], color: string | undefined) => {
@@ -1256,6 +1606,7 @@ export function CanvasView(props: {
   const startResize = (e: MouseEvent, n: CanvasNode, dir: string) => {
     e.stopPropagation();
     e.preventDefault();
+    if (n.lock) return;
     setSelectedEdge(null);
     setSelectedCard(n.id);
     resizing = { id: n.id, dir, start: { ...n } };
@@ -1387,6 +1738,7 @@ export function CanvasView(props: {
       onMouseUp={onUp}
       onWheel={onWheel}
       onDblClick={onDblClick}
+      onContextMenu={onCtxMenu}
     >
       <div
         class="canvas-plane"
@@ -1492,7 +1844,7 @@ export function CanvasView(props: {
                 <div
                   class="canvas-group"
                   data-node-id={n.id}
-                  classList={{ selected: isSelected(n.id) }}
+                  classList={{ selected: isSelected(n.id), locked: !!n.lock }}
                   style={{
                     left: `${n.x}px`,
                     top: `${n.y}px`,
@@ -1502,7 +1854,7 @@ export function CanvasView(props: {
                   }}
                   onMouseDown={(e) => onCardDown(e, n)}
                 >
-                  <Show when={selectedCard() === n.id}>
+                  <Show when={selectedCard() === n.id && !n.lock}>
                     <div class="card-toolbar" onMouseDown={(e) => e.stopPropagation()}>
                       <For each={Object.entries(PALETTE)}>
                         {([key, hex]) => (
@@ -1544,7 +1896,7 @@ export function CanvasView(props: {
                       </button>
                     </div>
                   </Show>
-                  <Show when={selectedCard() === n.id}>
+                  <Show when={selectedCard() === n.id && !n.lock}>
                     <For each={["nw", "ne", "se", "sw"]}>
                       {(dir) => (
                         <div
@@ -1566,6 +1918,7 @@ export function CanvasView(props: {
                         onMouseDown={(e) => e.stopPropagation()}
                         onDblClick={(e) => {
                           e.stopPropagation();
+                          if (n.lock) return;
                           setSelectedCard(n.id);
                           setLabelEdit(n.id);
                         }}
@@ -1725,6 +2078,7 @@ export function CanvasView(props: {
                   "canvas-shaped": shaped(),
                   "canvas-sticky": n.shape === "sticky",
                   selected: isSelected(n.id),
+                  locked: !!n.lock,
                 }}
                 data-node-id={n.id}
                 style={{
@@ -1740,14 +2094,16 @@ export function CanvasView(props: {
                 onMouseDown={(e) => onCardDown(e, n)}
                 onDblClick={(e) => {
                   e.stopPropagation();
+                  if (n.lock) return; // khoá thì double-click không mở editor
                   if (n.type === "text") setEditing(n.id);
                   else if (n.type === "file" && n.file && !isImagePath(n.file))
                     props.onOpenNote(n.file);
                   else if (n.type === "link" && n.url) window.open(n.url, "_blank");
                 }}
               >
-                {/* Toolbar nổi khi card được chọn: 6 màu + bỏ màu + xóa */}
-                <Show when={selectedCard() === n.id && editing() !== n.id}>
+                {/* Toolbar nổi khi card được chọn: 6 màu + bỏ màu + xóa.
+                    Card khoá không có toolbar — mở khoá bằng menu chuột phải. */}
+                <Show when={selectedCard() === n.id && editing() !== n.id && !n.lock}>
                   <div class="card-toolbar" onMouseDown={(e) => e.stopPropagation()}>
                     <For each={Object.entries(PALETTE)}>
                       {([key, hex]) => (
@@ -1813,7 +2169,7 @@ export function CanvasView(props: {
                     </div>
                   )}
                 </Show>
-                <Show when={selectedCard() === n.id && editing() !== n.id}>
+                <Show when={selectedCard() === n.id && editing() !== n.id && !n.lock}>
                   <Handles />
                 </Show>
                 <div
@@ -2070,12 +2426,19 @@ export function CanvasView(props: {
                 <b>Delete</b> xoá card/edge đang chọn · <b>Esc</b> huỷ tool
               </div>
               <div>
-                <b>Ctrl+Z</b> hoàn tác · <b>Ctrl+Shift+Z</b> làm lại
+                <b>Ctrl+C</b> sao chép · <b>Ctrl+D</b> nhân đôi · <b>PgUp/PgDn</b> đổi lớp
+              </div>
+              <div>
+                <b>Ctrl+Z</b> hoàn tác · <b>Ctrl+Shift+Z</b> làm lại ·{" "}
+                <b>chuột phải</b> mở menu
               </div>
             </div>
           </Show>
         </div>
       </div>
+      <Show when={ctxMenu()}>
+        {(m) => <ContextMenu anchor={m()} onClose={() => setCtxMenu(null)} />}
+      </Show>
     </div>
   );
 }

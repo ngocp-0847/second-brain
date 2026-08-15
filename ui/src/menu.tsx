@@ -13,6 +13,8 @@ export interface MenuItem {
   onSelect?: () => void;
   /** Item cha của submenu: bỏ onSelect, đưa các item con vào đây. */
   submenu?: MenuItem[];
+  /** Phím tắt hiện mờ bên phải, ví dụ "Ctrl+C". Chỉ để hiển thị. */
+  shortcut?: string;
   /** Hành động phá huỷ (Xóa) — tô màu --danger. */
   danger?: boolean;
   /** Dòng kẻ ngăn nhóm; các field khác bỏ trống. */
@@ -88,6 +90,9 @@ function Panel(props: {
                 {(Icon) => <Dynamic component={Icon()} class="ctx-icon" />}
               </Show>
               <span class="ctx-label">{it.label}</span>
+              <Show when={it.shortcut}>
+                <span class="ctx-shortcut">{it.shortcut}</span>
+              </Show>
               <Show when={it.submenu}>
                 <span class="ctx-caret">›</span>
               </Show>
