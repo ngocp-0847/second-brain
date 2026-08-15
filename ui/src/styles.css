@@ -1150,6 +1150,17 @@ details[open] > .tree-dir .tree-dir-arrow {
   top: -50px;
 }
 
+/* Item khoá: không kéo, không đổi cỡ, không sửa — con trỏ nói đúng điều đó.
+   Mở khoá bằng menu chuột phải. */
+.canvas-card.locked,
+.canvas-group.locked {
+  cursor: default;
+}
+
+.canvas-card.locked .canvas-port {
+  display: none;
+}
+
 .canvas-card:hover {
   border-color: var(--accent-border);
 }
@@ -1369,8 +1380,14 @@ details[open] > .tree-dir .tree-dir-arrow {
   overflow: hidden;
 }
 
+/* KHÔNG ép chiều cao editor. Bị ép thì CodeMirror tự cuộn bên trong
+ * .cm-scroller: mỗi lần Enter, chữ đã gõ trôi lên khỏi tầm nhìn và card chẳng
+ * hề biết mình đang thiếu chỗ (phần tràn nằm trong CM, không lộ ra
+ * .card-editor-host để đo). Cho editor cao theo chữ, phần tràn nổi lên đúng chỗ
+ * đo được, và card nới ra — chữ cũ luôn còn nguyên trên màn hình. */
 .card-editor-host .cm-editor {
-  height: 100%;
+  height: auto;
+  min-height: 100%;
   background: transparent;
 }
 
@@ -1771,6 +1788,12 @@ details[open] > .tree-dir .tree-dir-arrow {
 
 .ctx-label {
   flex: 1;
+}
+
+.ctx-shortcut {
+  color: var(--fg-faint);
+  padding-left: var(--sp-lg);
+  font-size: 11.5px;
 }
 
 .ctx-caret {

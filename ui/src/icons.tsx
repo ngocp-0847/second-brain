@@ -81,6 +81,18 @@ export {
   Redo2 as IconRedo,
   Group as IconGroup,
   Ungroup as IconUngroup,
+  // ---- menu chuột phải trên canvas ----
+  Copy as IconCopy,
+  ClipboardPaste as IconPaste,
+  Lock as IconLock,
+  LockOpen as IconUnlock,
+  Layers as IconArrange,
+  MoveUp as IconBringForward,
+  BringToFront as IconBringFront,
+  MoveDown as IconSendBackward,
+  SendToBack as IconSendBack,
+  SquareDashedMousePointer as IconSelectAll,
+  Maximize as IconFit,
 } from "lucide-solid";
 
 // IconUndo trùng tên với IconRestore (cùng là Undo2) nên export riêng cho rõ ý.
