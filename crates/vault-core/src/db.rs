@@ -662,6 +662,9 @@ fn connect(db_path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // App GUI và MCP server (agent ngoài) có thể cùng index một cache.db —
+    // chờ thay vì báo "database is locked".
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(conn)
 }
 

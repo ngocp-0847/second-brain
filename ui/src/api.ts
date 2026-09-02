@@ -98,6 +98,10 @@ export const api = {
   /** Sửa đúng vùng chọn: trả về text mới cho vùng đó, UI tự thay vào editor. */
   agentTransform: (selection: string, instruction: string, contextPath: string | null) =>
     invoke<string>("agent_transform", { selection, instruction, contextPath }),
+  /** MCP server của vault: exe, lệnh đăng ký, trạng thái trên từng agent CLI. */
+  mcpInfo: () => invoke<McpInfo>("mcp_info"),
+  mcpRegister: (cli: "claude" | "codex") => invoke<string>("mcp_register", { cli }),
+  mcpUnregister: (cli: "claude" | "codex") => invoke<string>("mcp_unregister", { cli }),
   termOpen: (cols: number, rows: number) => invoke<number>("term_open", { cols, rows }),
   termWrite: (id: number, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: number, cols: number, rows: number) =>
@@ -120,6 +124,17 @@ export interface RevisionMeta {
 export interface GraphData {
   nodes: { path: string; title: string; degree: number }[];
   edges: { from: string; to: string }[];
+}
+
+export interface McpInfo {
+  exe: string;
+  vault: string;
+  claude_cmd: string;
+  codex_cmd: string;
+  json_config: string;
+  /** null = CLI không có trên PATH. */
+  claude_registered: boolean | null;
+  codex_registered: boolean | null;
 }
 
 export interface LlmSettings {

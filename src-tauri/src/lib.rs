@@ -4,6 +4,7 @@
 mod agent;
 mod git;
 mod history;
+pub mod mcp_setup;
 mod terminal;
 
 use serde::Serialize;
@@ -564,8 +565,37 @@ fn agent_chat(
     let root = with_vault(&state, |v| Ok(v.root.clone()))?;
     // Lưới an toàn: git snapshot cả vault trước khi cho agent sửa file.
     let _ = janitor::snapshot(&root, "agent");
-    agent::chat(&app, provider, &root, &message, context_path.as_deref(), session_id.as_deref())
-        .map_err(err)
+    // Agent headless được cắm MCP server của vault: search/backlinks/rename có rewrite link…
+    let mcp_cfg = mcp_setup::write_config(&root).ok();
+    agent::chat(
+        &app,
+        provider,
+        &root,
+        &message,
+        context_path.as_deref(),
+        session_id.as_deref(),
+        mcp_cfg.as_deref(),
+    )
+    .map_err(err)
+}
+
+/// Thông tin MCP server của vault đang mở: exe, lệnh đăng ký, trạng thái từng CLI.
+#[tauri::command(async)]
+fn mcp_info(state: State<AppState>) -> CmdResult<mcp_setup::McpInfo> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    mcp_setup::info(&root).map_err(err)
+}
+
+/// Đăng ký server với `claude` hoặc `codex` (scope user — dùng được ở mọi thư mục).
+#[tauri::command(async)]
+fn mcp_register(cli: String, state: State<AppState>) -> CmdResult<String> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    mcp_setup::register(&cli, &root).map_err(err)
+}
+
+#[tauri::command(async)]
+fn mcp_unregister(cli: String) -> CmdResult<String> {
+    mcp_setup::unregister(&cli).map_err(err)
 }
 
 /// Sửa vùng chọn trong editor bằng agent: trả về text mới cho ĐÚNG vùng đó,
@@ -599,7 +629,9 @@ fn term_open(
 ) -> CmdResult<u32> {
     let cwd = state.vault.lock().ok().and_then(|g| g.as_ref().map(|v| v.root.clone()));
     let run_claude = qa::provider_available(qa::Provider::ClaudeCli);
-    terminal::open(app, &term, cwd, cols, rows, run_claude).map_err(err)
+    // Terminal trong app vào thẳng claude đã cắm MCP server của vault — không cần đăng ký tay.
+    let mcp_cfg = cwd.as_deref().and_then(|r| mcp_setup::write_config(r).ok());
+    terminal::open(app, &term, cwd, cols, rows, run_claude, mcp_cfg).map_err(err)
 }
 
 #[tauri::command]
@@ -830,6 +862,9 @@ pub fn run() {
             git_sync,
             agent_chat,
             agent_transform,
+            mcp_info,
+            mcp_register,
+            mcp_unregister,
             note_history,
             history_get,
             term_open,

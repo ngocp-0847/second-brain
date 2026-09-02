@@ -44,6 +44,7 @@ pub fn open(
     cols: u16,
     rows: u16,
     run_claude: bool,
+    mcp_config: Option<std::path::PathBuf>,
 ) -> anyhow::Result<u32> {
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
@@ -68,7 +69,12 @@ pub fn open(
 
     // ConPTY buffer input nên gõ sớm trước khi shell sẵn sàng vẫn được nhận.
     if run_claude {
-        let _ = writer.write_all(b"claude\r");
+        // `--mcp-config` cắm MCP server của vault vào phiên claude này (không cần đăng ký tay).
+        let line = match &mcp_config {
+            Some(p) => format!("claude --mcp-config \"{}\"\r", p.to_string_lossy()),
+            None => "claude\r".to_string(),
+        };
+        let _ = writer.write_all(line.as_bytes());
     }
 
     let app2 = app.clone();

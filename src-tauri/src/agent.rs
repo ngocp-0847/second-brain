@@ -33,7 +33,9 @@ fn system_prompt(context_path: Option<&str>) -> String {
          Quy tắc:\n\
          - Chỉ đọc/sửa file bên trong vault. Không đụng vào .brain/, .git/, .obsidian/.\n\
          - Giữ nguyên wikilink [[...]] trừ khi được yêu cầu; đổi tên/di chuyển file thì cập nhật mọi link trỏ tới.\n\
-         - Trả lời ngắn gọn bằng tiếng Việt, cuối câu trả lời liệt kê file đã thay đổi (nếu có).\n",
+         - Trả lời ngắn gọn bằng tiếng Việt, cuối câu trả lời liệt kê file đã thay đổi (nếu có).\n\
+         - Nếu có MCP server `second-brain`: ưu tiên tool của nó (search_notes, read_note, \
+           replace_in_note, rename_note…) — rename_note tự rewrite mọi wikilink, trash_note vào thùng rác.\n",
     );
     if let Some(path) = context_path {
         p.push_str(&format!(
@@ -46,7 +48,7 @@ fn system_prompt(context_path: Option<&str>) -> String {
 }
 
 /// CLI cài qua npm trên Windows là shim `.cmd` → phải chạy qua `cmd /c`.
-fn shell_command(cmd: &str, args: &[&str]) -> Command {
+pub(crate) fn shell_command(cmd: &str, args: &[&str]) -> Command {
     let mut c = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.arg("/c").arg(cmd);
@@ -66,6 +68,7 @@ pub fn chat(
     message: &str,
     context_path: Option<&str>,
     session_id: Option<&str>,
+    mcp_config: Option<&std::path::Path>,
 ) -> Result<AgentReply> {
     // Path nhúng thẳng vào tin nhắn — system prompt có thể không được áp lại khi --resume,
     // và agent từng tự đoán "note đang mở" qua .obsidian/workspace thay vì dùng ngữ cảnh.
@@ -74,7 +77,10 @@ pub fn chat(
         None => message.to_string(),
     };
     match provider {
-        qa::Provider::ClaudeCli => chat_claude(app, root, &message, context_path, session_id),
+        qa::Provider::ClaudeCli => {
+            chat_claude(app, root, &message, context_path, session_id, mcp_config)
+        }
+        // Codex headless dùng server đã đăng ký ở mức user (Settings → MCP → Đăng ký).
         qa::Provider::CodexCli => chat_codex(root, &message, context_path),
     }
 }
@@ -133,8 +139,15 @@ fn chat_claude(
     message: &str,
     context_path: Option<&str>,
     session_id: Option<&str>,
+    mcp_config: Option<&std::path::Path>,
 ) -> Result<AgentReply> {
     let sys = system_prompt(context_path);
+    // `mcp__second-brain` = cho phép mọi tool của server đó không cần hỏi.
+    let allowed = if mcp_config.is_some() {
+        "Bash,Edit,Write,MultiEdit,mcp__second-brain"
+    } else {
+        "Bash,Edit,Write,MultiEdit"
+    };
     let mut args = vec![
         "-p",
         "--output-format",
@@ -143,10 +156,15 @@ fn chat_claude(
         "--permission-mode",
         "acceptEdits",
         "--allowedTools",
-        "Bash,Edit,Write,MultiEdit",
+        allowed,
         "--append-system-prompt",
         &sys,
     ];
+    let cfg_str = mcp_config.map(|p| p.to_string_lossy().into_owned());
+    if let Some(cfg) = cfg_str.as_deref() {
+        args.push("--mcp-config");
+        args.push(cfg);
+    }
     if let Some(id) = session_id {
         args.push("--resume");
         args.push(id);
