@@ -1309,8 +1309,14 @@ export default function App() {
   const omniItems = () => {
     const titles = omniTitleMatches().map((n) => ({ path: n.path, label: n.title, sub: n.path, line: 0 }));
     const seen = new Set(titles.map((t) => t.path));
+    // seen mang cả path của phần khớp tiêu đề: một note chỉ được một dòng, dù
+    // khớp cả tiêu đề lẫn nhiều đoạn nội dung.
     const contents = omniHits()
-      .filter((h) => !seen.has(h.path))
+      .filter((h) => {
+        if (seen.has(h.path)) return false;
+        seen.add(h.path);
+        return true;
+      })
       .map((h) => ({
         path: h.path,
         label: h.title,
