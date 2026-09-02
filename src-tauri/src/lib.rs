@@ -436,7 +436,7 @@ fn history_get(id: i64, state: State<AppState>) -> CmdResult<String> {
 /// Search từ khóa (FTS5/BM25).
 #[tauri::command]
 fn search_notes(query: String, limit: usize, state: State<AppState>) -> CmdResult<Vec<SearchHitDto>> {
-    with_vault(&state, |v| Ok(v.db.search(&query, limit)?.into_iter().map(hit_dto).collect()))
+    with_vault(&state, |v| Ok(v.db.search_notes(&query, limit)?.into_iter().map(hit_dto).collect()))
 }
 
 #[derive(Serialize)]

@@ -384,6 +384,25 @@ impl Db {
         }
     }
 
+    /// Như [`Db::search`] nhưng MỖI NOTE chỉ một kết quả — chunk khớp nhất.
+    ///
+    /// Ô tìm kiếm của app liệt kê note, nên một note dài khớp ở năm sáu chunk sẽ
+    /// hiện thành năm sáu dòng cùng tiêu đề. RAG thì vẫn cần nhiều chunk của
+    /// cùng một note nên `search` giữ nguyên mức chunk.
+    pub fn search_notes(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        use std::collections::HashSet;
+        // Lấy dư vì các chunk cùng note ăn hết chỗ; hàng đầu của mỗi note là
+        // hàng khớp nhất (query đã ORDER BY rank).
+        let scan = limit.saturating_mul(8).max(50);
+        let mut seen = HashSet::new();
+        Ok(self
+            .search(query, scan)?
+            .into_iter()
+            .filter(|h| seen.insert(h.path.clone()))
+            .take(limit)
+            .collect())
+    }
+
     /// Note liên quan với `note_path` — thuần SQL, không cần model.
     ///
     /// Cộng điểm từ ba tín hiệu của chính graph vault: tag chung, cùng link tới

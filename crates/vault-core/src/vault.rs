@@ -583,4 +583,37 @@ mod tests {
         drop(v);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn search_notes_gop_cac_chunk_cung_note() {
+        let tmp = std::env::temp_dir().join(format!("brain-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Mỗi heading là một chunk → note này khớp "tokio" ở ba chỗ.
+        write(
+            &tmp,
+            "nhieu.md",
+            "# Ghi chú\n## Một\nChỗ này nhắc tokio.\n## Hai\nCũng tokio.\n## Ba\nLại tokio.\n",
+        );
+        write(&tmp, "it.md", "# Khác\nMột lần tokio thôi.\n");
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+
+        // Mức chunk (RAG) vẫn thấy hết.
+        assert!(v.db.search("tokio", 10).unwrap().len() >= 4);
+
+        // Mức note (ô tìm kiếm) thì mỗi note một dòng.
+        let hits = v.db.search_notes("tokio", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        let mut paths: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["it.md", "nhieu.md"]);
+
+        // limit đếm theo note, không phải theo chunk.
+        assert_eq!(v.db.search_notes("tokio", 1).unwrap().len(), 1);
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
