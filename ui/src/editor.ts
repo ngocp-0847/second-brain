@@ -19,7 +19,7 @@ import {
 } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorState, Range } from "@codemirror/state";
+import { Compartment, EditorState, Range, StateField } from "@codemirror/state";
 import {
   Decoration,
   DecorationSet,
@@ -94,10 +94,11 @@ const loadMermaid = () => {
 const mermaidCache = new Map<string, string>(); // code → svg
 const MERMAID_CACHE_MAX = 40;
 
-/** Block mermaid kết thúc ở đúng dòng cuối file thì widget chiếm trọn dòng cuối
- *  và KHÔNG còn vị trí nào phía dưới để đặt con trỏ — CodeMirror sẽ đẩy con trỏ
- *  ngược lên trên block mỗi lần bạn bấm xuống dưới. Thêm một dòng trống để thoát. */
-const ensureRoomAfterFence = (text: string) => (/```[ \t]*$/.test(text) ? `${text}\n` : text);
+/** Block mermaid (hay bảng) kết thúc ở đúng dòng cuối file thì widget chiếm trọn
+ *  dòng cuối và KHÔNG còn vị trí nào phía dưới để đặt con trỏ — CodeMirror sẽ đẩy con
+ *  trỏ ngược lên trên block mỗi lần bấm xuống dưới. Thêm một dòng trống để thoát. */
+const ensureRoomAfterBlock = (text: string) =>
+  /```[ \t]*$|\|[ \t]*$/.test(text) ? `${text}\n` : text;
 
 /** Khoảng của block ```mermaid chứa `pos`, hoặc null. Quét bằng text nên không
  *  phụ thuộc syntax tree (có thể chưa parse xong ngay sau khi dán). */
@@ -226,52 +227,304 @@ class MermaidWidget extends WidgetType {
   }
 }
 
-function buildLivePreview(view: EditorView): DecorationSet {
-  const decos: Range<Decoration>[] = [];
-  const state = view.state;
+// ---- bảng GFM: render ```| a | b |``` thành <table> khi con trỏ ở ngoài bảng ----
+// Lezer (base markdownLanguage) đã parse ra node `Table`, chỉ thiếu chỗ vẽ. Tự
+// tách ô từ text nguồn thay vì đi theo TableCell của cây: cần map từng HÀNG về
+// đúng số dòng nguồn để bấm vào là sửa được.
 
-  const activeLines = new Set<number>();
+/** Chia một dòng bảng thành các ô, tôn trọng `\|` đã escape. */
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && s[i + 1] === "|") {
+      cur += "|";
+      i++;
+    } else if (s[i] === "|") {
+      cells.push(cur.trim());
+      cur = "";
+    } else {
+      cur += s[i];
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+const DELIM_CELL = /^:?-+:?$/;
+
+type Align = "left" | "center" | "right" | null;
+
+const alignOf = (cell: string): Align => {
+  const s = cell.trim();
+  if (!DELIM_CELL.test(s)) return null;
+  const l = s.startsWith(":");
+  const r = s.endsWith(":");
+  return l && r ? "center" : r ? "right" : l ? "left" : null;
+};
+
+interface TableModel {
+  head: string[];
+  /** Hàng thân, cùng thứ tự với dòng nguồn (dòng nguồn của rows[i] = dòng đầu + 2 + i). */
+  rows: string[][];
+  aligns: Align[];
+  /** Text nguồn — dùng cho eq() để CodeMirror biết khi nào phải dựng lại widget. */
+  src: string;
+}
+
+/** Bảng ở khoảng dòng [first..last], hoặc null nếu không đúng dạng GFM. */
+function parseTable(state: EditorState, first: number, last: number): TableModel | null {
+  const lines: string[] = [];
+  for (let i = first; i <= last; i++) lines.push(state.doc.line(i).text);
+  if (lines.length < 2) return null;
+  const delim = splitRow(lines[1]);
+  if (!delim.every((c) => DELIM_CELL.test(c))) return null;
+  const head = splitRow(lines[0]);
+  return {
+    head,
+    rows: lines.slice(2).map(splitRow),
+    aligns: head.map((_, i) => alignOf(delim[i] ?? "")),
+    src: lines.join("\n"),
+  };
+}
+
+// Inline trong ô: **đậm**, *nghiêng*, `code`, ~~gạch~~, [[wiki]], link, URL trần.
+// Thứ tự quan trọng: `**` phải đứng trước `*`, nếu không `*` nuốt mất một dấu sao.
+const INLINE_MD =
+  /(\*\*|__)([\s\S]+?)\1|(~~)([\s\S]+?)\3|(`)([^`]+?)\5|(\*|_)([\s\S]+?)\7|\[\[([^\[\]]+?)\]\]|\[([^\]]+?)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+)/g;
+
+function urlLink(href: string, label: string): HTMLAnchorElement {
+  const a = document.createElement("a");
+  a.className = "cm-md-link";
+  a.href = href;
+  a.title = href;
+  a.textContent = label;
+  // Điều hướng thật sẽ đưa cả webview Tauri đi mất — mở cửa sổ ngoài thay vào đó.
+  a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    window.open(href, "_blank");
+  });
+  return a;
+}
+
+/** Render markdown inline vào `host` (DOM thuần — widget không dùng JSX). */
+function renderInline(text: string, host: HTMLElement) {
+  const wrap = (tag: string, s: string) => {
+    const el = document.createElement(tag);
+    renderInline(s, el);
+    return el;
+  };
+  let last = 0;
+  for (const m of text.matchAll(INLINE_MD)) {
+    if (m.index > last) host.append(text.slice(last, m.index));
+    last = m.index + m[0].length;
+    if (m[2] !== undefined) host.append(wrap("strong", m[2]));
+    else if (m[4] !== undefined) host.append(wrap("del", m[4]));
+    else if (m[6] !== undefined) {
+      const code = document.createElement("code");
+      code.textContent = m[6];
+      host.append(code);
+    } else if (m[8] !== undefined) host.append(wrap("em", m[8]));
+    else if (m[9] !== undefined) {
+      const inner = m[9];
+      const pipe = inner.indexOf("|");
+      const target = (pipe >= 0 ? inner.slice(0, pipe) : inner).split("#")[0].trim();
+      const el = document.createElement("span");
+      el.className = "cm-wikilink"; // Ctrl+Click do domEventHandlers của editor lo
+      el.dataset.target = target;
+      el.title = `Ctrl+Click để mở "${target}"`;
+      el.textContent = pipe >= 0 ? inner.slice(pipe + 1) : inner;
+      host.append(el);
+    } else if (m[10] !== undefined) host.append(urlLink(m[11], m[10]));
+    else host.append(urlLink(m[12], m[12]));
+  }
+  if (last < text.length) host.append(text.slice(last));
+}
+
+class TableWidget extends WidgetType {
+  constructor(readonly model: TableModel) {
+    super();
+  }
+
+  eq(other: TableWidget) {
+    return other.model.src === this.model.src;
+  }
+
+  toDOM(view: EditorView) {
+    const el = document.createElement("div");
+    el.className = "cm-md-table";
+    const table = document.createElement("table");
+    const cols = this.model.head.length;
+
+    const addRow = (parent: HTMLElement, cells: string[], tag: "th" | "td", offset: number) => {
+      const tr = document.createElement("tr");
+      tr.dataset.row = String(offset);
+      for (let i = 0; i < cols; i++) {
+        const cell = document.createElement(tag);
+        const align = this.model.aligns[i];
+        if (align) cell.style.textAlign = align;
+        renderInline(cells[i] ?? "", cell);
+        tr.append(cell);
+      }
+      parent.append(tr);
+    };
+
+    const thead = document.createElement("thead");
+    addRow(thead, this.model.head, "th", 0);
+    const tbody = document.createElement("tbody");
+    // +2: bỏ qua dòng tiêu đề và dòng |---|.
+    this.model.rows.forEach((cells, i) => addRow(tbody, cells, "td", i + 2));
+    table.append(thead, tbody);
+    el.append(table);
+
+    // Bấm vào một hàng → đưa con trỏ vào đúng dòng nguồn, bảng tự chuyển về text
+    // thô để sửa. Vị trí phải lấy tại thời điểm bấm bằng posAtDOM: widget được
+    // tái dùng khi text không đổi (xem eq()), nên toạ độ lưu lúc dựng có thể lệch.
+    el.addEventListener("click", (ev) => {
+      if (ev.ctrlKey || ev.metaKey) return; // dành cho Ctrl+Click mở link
+      const row = (ev.target as HTMLElement).closest("tr");
+      const doc = view.state.doc;
+      const start = doc.lineAt(view.posAtDOM(el)).number;
+      const line = doc.line(Math.min(start + Number(row?.dataset.row ?? 0), doc.lines));
+      view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
+      view.focus();
+    });
+    return el;
+  }
+
+  /** Cho mousedown đi qua để handler Ctrl+Click [[wikilink]] của editor chạy được. */
+  ignoreEvent(e: Event) {
+    return e.type !== "mousedown";
+  }
+}
+
+// ---- widget thay cả khối (mermaid, bảng) phải đi qua StateField ----
+// CodeMirror CHẶN block decoration đến từ ViewPlugin ("Block decorations may not
+// be specified via plugins"), nên phần thay cả khối nằm ở state field này;
+// ViewPlugin bên dưới chỉ còn lo decoration inline. Field quét cả tài liệu bằng
+// text — không dùng syntax tree vì tree chỉ parse tới viewport — và chỉ tính lại
+// khi doc đổi hoặc tập dòng có con trỏ đổi.
+
+interface BlockPreview {
+  deco: DecorationSet;
+  /** Khoảng đã bị thay — decoration inline KHÔNG được chồng vào đây. */
+  spans: { from: number; to: number }[];
+}
+
+const FENCE = /^\s*(`{3,}|~{3,})\s*(\S*)/;
+
+/** Tập dòng đang có con trỏ — khối chứa con trỏ phải hiện text thô để sửa. */
+const activeLineSet = (state: EditorState) => {
+  const set = new Set<number>();
   for (const r of state.selection.ranges) {
     const a = state.doc.lineAt(r.from).number;
     const b = state.doc.lineAt(r.to).number;
-    for (let i = a; i <= b; i++) activeLines.add(i);
+    for (let i = a; i <= b; i++) set.add(i);
   }
+  return set;
+};
+
+/** Dòng `|---|:--:|` khớp số cột với dòng tiêu đề → đúng là bảng GFM. */
+const isDelimiterRow = (delim: string, header: string) => {
+  if (!delim.includes("-") || !delim.includes("|")) return false;
+  const cells = splitRow(delim);
+  return cells.length === splitRow(header).length && cells.every((c) => DELIM_CELL.test(c));
+};
+
+function buildBlocks(state: EditorState): BlockPreview {
+  const doc = state.doc;
+  const active = activeLineSet(state);
+  const decos: Range<Decoration>[] = [];
+  const spans: { from: number; to: number }[] = [];
+
+  const add = (first: number, last: number, widget: WidgetType) => {
+    // Con trỏ nằm trong khối thì PHẢI hiện text thô: Decoration.replace
+    // block-level không được bao con trỏ, nếu không CodeMirror đẩy con trỏ ra
+    // và thao tác gõ loạn.
+    for (let i = first; i <= last; i++) if (active.has(i)) return;
+    const from = doc.line(first).from;
+    const to = doc.line(last).to;
+    decos.push(Decoration.replace({ widget, block: true }).range(from, to));
+    spans.push({ from, to });
+  };
+
+  let i = 1;
+  while (i <= doc.lines) {
+    const text = doc.line(i).text;
+    const fence = text.match(FENCE);
+    if (fence) {
+      const close = new RegExp("^\\s*" + fence[1][0] + "{" + fence[1].length + ",}\\s*$");
+      let last = doc.lines;
+      for (let j = i + 1; j <= doc.lines; j++) {
+        if (close.test(doc.line(j).text)) {
+          last = j;
+          break;
+        }
+      }
+      // ```mermaid → thay cả block bằng diagram. Cú pháp chuẩn Obsidian, nội
+      // dung file .md không đổi gì. Dán xong thì onPaste tự đưa con trỏ ra sau
+      // block để diagram hiện ngay.
+      if (fence[2].toLowerCase() === "mermaid" && last > i + 1) {
+        const code = state.sliceDoc(doc.line(i + 1).from, doc.line(last - 1).to);
+        if (code.trim()) add(i, last, new MermaidWidget(code, doc.line(i).to));
+      }
+      i = last + 1;
+      continue;
+    }
+    // Dòng tiêu đề + dòng |---| → bảng. Thân bảng chạy tới dòng trống, dòng
+    // không còn dấu | , hoặc một hàng rào code.
+    if (i < doc.lines && text.includes("|") && isDelimiterRow(doc.line(i + 1).text, text)) {
+      let last = i + 1;
+      while (last < doc.lines) {
+        const next = doc.line(last + 1).text;
+        if (!next.trim() || !next.includes("|") || FENCE.test(next)) break;
+        last++;
+      }
+      const model = parseTable(state, i, last);
+      if (model) add(i, last, new TableWidget(model));
+      i = last + 1;
+      continue;
+    }
+    i++;
+  }
+  return { deco: Decoration.set(decos, true), spans };
+}
+
+/** Khóa "tập dòng đang có con trỏ" — thứ duy nhất của selection đổi decoration. */
+const activeKey = (state: EditorState) =>
+  state.selection.ranges
+    .map((r) => `${state.doc.lineAt(r.from).number}-${state.doc.lineAt(r.to).number}`)
+    .join(",");
+
+const blockPreview = StateField.define<BlockPreview>({
+  create: buildBlocks,
+  update(value, tr) {
+    // Gõ trong cùng một dòng: selection đổi liên tục nhưng tập dòng active không
+    // đổi → khối y hệt, khỏi quét lại cả tài liệu mỗi lần nhấn phím.
+    if (!tr.docChanged && activeKey(tr.startState) === activeKey(tr.state)) return value;
+    return buildBlocks(tr.state);
+  },
+  provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
+});
+
+/** Decoration inline: ẩn dấu cú pháp và render [[wikilink]] gọn. Khối đã bị
+ *  blockPreview thay bằng widget thì bỏ qua — không chồng lên được. */
+function buildLivePreview(view: EditorView): DecorationSet {
+  const decos: Range<Decoration>[] = [];
+  const state = view.state;
+  const activeLines = activeLineSet(state);
+  const { spans } = state.field(blockPreview);
+  const inReplaced = (a: number, b: number) => spans.some((r) => a < r.to && b > r.from);
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
       from,
       to,
       enter(node) {
-        // ```mermaid → thay cả block bằng diagram. Cú pháp chuẩn Obsidian —
-        // nội dung file .md không đổi gì. Preview là mặc định KỂ CẢ khi con trỏ
-        // nằm trong block (dán vào là thấy ngay); chỉ block được bấm nút <>
-        // mới hiện code thô.
-        if (node.name === "FencedCode") {
-          const first = state.doc.lineAt(node.from);
-          const last = state.doc.lineAt(node.to);
-          const lang = first.text.replace(/^\s*`+/, "").trim().toLowerCase();
-          if (lang !== "mermaid") return;
-          // Con trỏ nằm trong block thì PHẢI hiện code thô: Decoration.replace
-          // block-level không được bao con trỏ, nếu không CodeMirror sẽ đẩy con
-          // trỏ ra và thao tác gõ loạn. Dán xong thì onPaste tự đưa con trỏ ra
-          // sau block để diagram hiện ngay.
-          for (let i = first.number; i <= last.number; i++) {
-            if (activeLines.has(i)) return false;
-          }
-          const code =
-            last.number > first.number + 1
-              ? state.sliceDoc(state.doc.line(first.number + 1).from, state.doc.line(last.number - 1).to)
-              : "";
-          if (code.trim()) {
-            decos.push(
-              Decoration.replace({
-                widget: new MermaidWidget(code, first.to),
-                block: true,
-              }).range(first.from, last.to),
-            );
-          }
-          return false;
-        }
         if (
           node.name !== "HeaderMark" &&
           node.name !== "EmphasisMark" &&
@@ -280,6 +533,7 @@ function buildLivePreview(view: EditorView): DecorationSet {
         )
           return;
         if (activeLines.has(state.doc.lineAt(node.from).number)) return;
+        if (inReplaced(node.from, node.to)) return;
         let end = node.to;
         if (node.name === "HeaderMark" && state.doc.sliceString(end, end + 1) === " ") end++;
         // CodeMark của fenced block (```): giữ nguyên, chỉ ẩn inline `
@@ -292,6 +546,7 @@ function buildLivePreview(view: EditorView): DecorationSet {
     for (const m of text.matchAll(WIKILINK)) {
       const start = from + m.index;
       const end = start + m[0].length;
+      if (inReplaced(start, end)) continue; // widget tự render wikilink của nó
       const line = state.doc.lineAt(start).number;
       const inner = m[2];
       const pipe = inner.indexOf("|");
@@ -315,13 +570,6 @@ function buildLivePreview(view: EditorView): DecorationSet {
   return Decoration.set(decos, true);
 }
 
-/** Tập dòng đang có con trỏ — thứ duy nhất của selection ảnh hưởng tới decoration. */
-const activeLineKey = (view: EditorView) => {
-  const doc = view.state.doc;
-  return view.state.selection.ranges
-    .map((r) => `${doc.lineAt(r.from).number}-${doc.lineAt(r.to).number}`)
-    .join(",");
-};
 
 const livePreview = ViewPlugin.fromClass(
   class {
@@ -329,13 +577,13 @@ const livePreview = ViewPlugin.fromClass(
     lastActive: string;
     constructor(view: EditorView) {
       this.decorations = buildLivePreview(view);
-      this.lastActive = activeLineKey(view);
+      this.lastActive = activeKey(view.state);
     }
     update(u: ViewUpdate) {
       // Gõ trong cùng một dòng thì selection đổi liên tục nhưng tập dòng active
       // không đổi → decoration y hệt. Bỏ qua để khỏi iterate lại syntaxTree mỗi
       // lần nhấn phím (rất tốn khi note có fenced block lớn).
-      const active = activeLineKey(u.view);
+      const active = activeKey(u.view.state);
       if (!u.docChanged && !u.viewportChanged && active === this.lastActive) return;
       this.lastActive = active;
       this.decorations = buildLivePreview(u.view);
@@ -423,6 +671,39 @@ const themeStyles = {
     fontFamily: "Consolas, monospace",
     fontSize: "13px",
   },
+  // Bảng markdown đã render. Bọc trong div cuộn ngang để bảng rộng không phá layout.
+  ".cm-md-table": {
+    maxWidth: "46rem",
+    margin: "0.5rem auto",
+    padding: "0 1.5rem",
+    overflowX: "auto",
+    cursor: "text",
+  },
+  ".cm-md-table table": {
+    borderCollapse: "collapse",
+    width: "100%",
+    fontSize: "0.95em",
+    lineHeight: "1.5",
+  },
+  ".cm-md-table th, .cm-md-table td": {
+    border: "1px solid var(--border)",
+    padding: "0.35rem 0.6rem",
+    textAlign: "left",
+    verticalAlign: "top",
+  },
+  ".cm-md-table th": {
+    background: "var(--bg-panel)",
+    color: "var(--fg-strong)",
+    fontWeight: "600",
+  },
+  ".cm-md-table tbody tr:hover": { background: "var(--line-active)" },
+  ".cm-md-table code": {
+    fontFamily: "'Cascadia Code', Consolas, monospace",
+    fontSize: "0.9em",
+    color: "var(--code)",
+  },
+  ".cm-md-table a.cm-md-link": { color: "var(--link)", cursor: "pointer" },
+  ".cm-md-table .cm-wikilink": { color: "var(--accent)", cursor: "pointer" },
   ".cm-tooltip.cm-tooltip-autocomplete": {
     backgroundColor: "var(--bg-panel)",
     border: "1px solid var(--border-card)",
@@ -514,6 +795,7 @@ export function createEditor(opts: EditorOpts): EditorHandle {
         markdown({ base: markdownLanguage, codeLanguages: languages }),
         syntaxHighlighting(mdHighlight),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        blockPreview,
         livePreview,
         themeConf.of(makeTheme(dark)),
         autocompletion({ override: [wikiComplete], activateOnTyping: true }),
@@ -574,7 +856,7 @@ export function createEditor(opts: EditorOpts): EditorHandle {
     view,
     setContent(text) {
       suppress = true;
-      view.setState(makeState(ensureRoomAfterFence(text)));
+      view.setState(makeState(ensureRoomAfterBlock(text)));
       suppress = false;
       dirty = false;
       // setState không gọi update listener → tự dọn vùng chọn của note trước.
