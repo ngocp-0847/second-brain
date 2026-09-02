@@ -47,6 +47,10 @@ export {
   List as IconBullets,
   SpellCheck as IconSpell,
   Languages as IconTranslate,
+  // ---- terminal ----
+  Maximize2 as IconMaximize,
+  Minimize2 as IconMinimize,
+  Eraser as IconClear,
   // ---- chat ----
   RotateCcw as IconRestart,
   Link2 as IconLink,

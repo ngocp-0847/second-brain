@@ -1431,6 +1431,26 @@ export default function App() {
     }
   };
 
+  /** Watcher ở Rust báo file đổi trên đĩa từ NGOÀI app (Claude trong terminal, editor
+   *  khác, git pull). Cây + canvas luôn refresh; note đang mở chỉ reload khi chính nó
+   *  nằm trong danh sách đổi — và reload qua updateContent để Ctrl+Z còn tác dụng. */
+  const externalChanged = async (paths: string[]) => {
+    try {
+      applyInfo(await api.refresh());
+      setCanvases(await api.listCanvases().catch(() => []));
+    } catch (e) {
+      say(String(e));
+    }
+    const p = currentPath;
+    if (!p || !paths.includes(p)) return;
+    try {
+      editor.updateContent(await api.readNote(p));
+      loadPanels(p);
+    } catch {
+      // note vừa bị xoá/đổi tên bên ngoài — tab sẽ được dọn ở nhịp refresh kế tiếp
+    }
+  };
+
   // ---- Vùng chọn → AI ----
 
   /** Neo một panel nổi kích thước w×h cạnh vùng chọn, không cho tràn ra ngoài cửa sổ. */
@@ -1662,8 +1682,21 @@ export default function App() {
       setJanitorReport(e.payload);
       setJanitorBadge(true);
     });
+    const unlistenVault = listen<{ paths: string[] }>("vault-changed", (e) => {
+      void externalChanged(e.payload.paths);
+    });
+    // Hook Stop của Claude Code (phiên trong terminal) vừa kết thúc một lượt.
+    const unlistenAgent = listen<{ files: string[] }>("agent-turn", (e) => {
+      const files = e.payload.files;
+      if (files.length === 0) return;
+      const names = files.slice(0, 3).map((f) => f.replace(/^.*\//, "").replace(/\.md$/, ""));
+      const more = files.length > 3 ? ` +${files.length - 3}` : "";
+      say(`Claude vừa sửa ${files.length} note: ${names.join(", ")}${more} — xem 🕘 để so bản cũ`);
+    });
     onCleanup(() => {
       unlistenJanitor.then((f) => f());
+      unlistenVault.then((f) => f());
+      unlistenAgent.then((f) => f());
     });
 
     // Khôi phục lựa chọn LLM provider.
@@ -2330,7 +2363,12 @@ export default function App() {
                         onClick={() => pickRev(r.id)}
                       >
                         <div class="history-time">{fmtTs(r.ts)}</div>
-                        <div class="history-meta">{r.chars} ký tự</div>
+                        <div class="history-meta">
+                          {r.chars} ký tự
+                          <Show when={r.source === "claude"}>
+                            <span class="history-src" title="Bản này do Claude Code ghi (bắt qua hook)">Claude</span>
+                          </Show>
+                        </div>
                       </div>
                     )}
                   </For>

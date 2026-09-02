@@ -26,3 +26,4 @@ base64 = "0.22"
 rusqlite = { workspace = true }
 portable-pty = "0.9"
 wait-timeout = "0.2"
+notify-debouncer-mini = { workspace = true }
