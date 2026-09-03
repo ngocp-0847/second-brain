@@ -35,6 +35,7 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import type { NoteMeta } from "./api";
+import { isImagePath, resolveImageSrc } from "./assets";
 
 /** Vùng chọn hiện tại + toạ độ màn hình để neo toolbar nổi ("Sửa bằng AI"). */
 export interface SelectionInfo {
@@ -402,6 +403,59 @@ class TableWidget extends WidgetType {
   }
 }
 
+// ---- ảnh: dòng chỉ chứa ảnh sẽ render thành <img> ----
+// Chỉ nhận dòng CHỈ có ảnh. Ảnh nằm giữa câu vẫn là text thô — thay inline bằng
+// widget block sẽ vỡ dòng, mà ảnh chèn giữa đoạn cũng hiếm khi là chủ ý.
+//
+//   ![alt](https://… "title")   ·   ![alt](assets/a.png)   ·   ![[a.png|chú thích]]
+// Hai dạng src: `<…>` cho phép khoảng trắng (path tiếng Việt hay có), còn lại thì không.
+const MD_IMAGE =
+  /^\s*!\[([^\]]*)\]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+"[^"]*"|\s+'[^']*')?\s*\)\s*$/;
+const EMBED_IMAGE = /^\s*!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]\s*$/;
+
+class ImageWidget extends WidgetType {
+  constructor(
+    readonly src: string,
+    readonly alt: string,
+  ) {
+    super();
+  }
+
+  eq(other: ImageWidget) {
+    return other.src === this.src && other.alt === this.alt;
+  }
+
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = "cm-img";
+
+    const fail = (msg: string) => {
+      el.className = "cm-img cm-img-error";
+      el.textContent = msg;
+    };
+
+    const img = document.createElement("img");
+    img.alt = this.alt;
+    if (this.alt) img.title = this.alt;
+    // Ảnh remote hỏng/404 chỉ báo qua sự kiện error — không có nó thì người dùng
+    // thấy một khoảng trắng và tưởng app lỗi.
+    img.addEventListener("error", () => fail(`không tải được ảnh: ${this.src}`));
+    el.append(img);
+
+    resolveImageSrc(this.src)
+      .then((s) => {
+        img.src = s;
+      })
+      .catch((e) => fail(`không đọc được ảnh "${this.src}" — ${e}`));
+    return el;
+  }
+
+  /** Cho mousedown đi qua để bấm vào ảnh là đặt được con trỏ vào dòng mà sửa. */
+  ignoreEvent(e: Event) {
+    return e.type !== "mousedown";
+  }
+}
+
 // ---- widget thay cả khối (mermaid, bảng) phải đi qua StateField ----
 // CodeMirror CHẶN block decoration đến từ ViewPlugin ("Block decorations may not
 // be specified via plugins"), nên phần thay cả khối nằm ở state field này;
@@ -487,6 +541,19 @@ function buildBlocks(state: EditorState): BlockPreview {
       const model = parseTable(state, i, last);
       if (model) add(i, last, new TableWidget(model));
       i = last + 1;
+      continue;
+    }
+    const md = text.match(MD_IMAGE);
+    if (md) {
+      add(i, i, new ImageWidget((md[2] ?? md[3]).trim(), md[1]));
+      i++;
+      continue;
+    }
+    // `![[note]]` là nhúng note, không phải ảnh — chỉ nhận khi đuôi file là ảnh.
+    const embed = text.match(EMBED_IMAGE);
+    if (embed && isImagePath(embed[1])) {
+      add(i, i, new ImageWidget(embed[1].trim(), embed[2] ?? ""));
+      i++;
       continue;
     }
     i++;
@@ -670,6 +737,24 @@ const themeStyles = {
     color: "var(--danger)",
     fontFamily: "Consolas, monospace",
     fontSize: "13px",
+  },
+  // Ảnh đã render. Cùng bề ngang với mermaid/bảng để cả trang thẳng hàng.
+  ".cm-img": {
+    maxWidth: "46rem",
+    margin: "0.5rem auto",
+    padding: "0 1.5rem",
+  },
+  ".cm-img img": {
+    display: "block",
+    maxWidth: "100%",
+    height: "auto",
+    borderRadius: "8px",
+  },
+  ".cm-img-error": {
+    color: "var(--danger)",
+    fontFamily: "Consolas, monospace",
+    fontSize: "13px",
+    wordBreak: "break-all",
   },
   // Bảng markdown đã render. Bọc trong div cuộn ngang để bảng rộng không phá layout.
   ".cm-md-table": {

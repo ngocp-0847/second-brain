@@ -7,6 +7,7 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api, type NoteMeta } from "./api";
+import { IMG_EXTS, isImagePath, loadImage } from "./assets";
 // `dragging` của module dnd đổi tên: canvas đã có biến `dragging` riêng cho
 // việc kéo node trên bảng.
 import { dragging as draggingFile, setCanvasDropHandler } from "./dnd";
@@ -246,32 +247,6 @@ const SHAPES: { kind: ShapeKind; label: string }[] = [
 
 
 // ---- ảnh trong canvas: file node trỏ tới ảnh sẽ render như Obsidian ----
-const IMG_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
-const IMG_RE = new RegExp(`\\.(${IMG_EXTS.join("|")})$`, "i");
-const isImagePath = (p?: string) => !!p && IMG_RE.test(p);
-const MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
-  bmp: "image/bmp",
-  avif: "image/avif",
-};
-
-// Cache data-url theo path để không đọc lại file mỗi lần re-render.
-const imgCache = new Map<string, Promise<string>>();
-const loadImage = (path: string) => {
-  let p = imgCache.get(path);
-  if (!p) {
-    const ext = path.split(".").pop()!.toLowerCase();
-    p = api.readAsset(path).then((b64) => `data:${MIME[ext] ?? "image/png"};base64,${b64}`);
-    imgCache.set(path, p);
-  }
-  return p;
-};
-
 function CanvasImage(props: { path: string }) {
   const [src, setSrc] = createSignal<string | null>(null);
   loadImage(props.path)
