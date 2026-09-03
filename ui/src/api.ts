@@ -102,6 +102,10 @@ export const api = {
   mcpInfo: () => invoke<McpInfo>("mcp_info"),
   mcpRegister: (cli: "claude" | "codex") => invoke<string>("mcp_register", { cli }),
   mcpUnregister: (cli: "claude" | "codex") => invoke<string>("mcp_unregister", { cli }),
+  /** Plugin skill + MCP, cài vào Claude Code / Codex qua marketplace của chính CLI đó. */
+  pluginInfo: () => invoke<PluginInfo>("plugin_info"),
+  pluginInstall: (cli: "claude" | "codex") => invoke<string>("plugin_install", { cli }),
+  pluginUninstall: (cli: "claude" | "codex") => invoke<string>("plugin_uninstall", { cli }),
   termOpen: (cols: number, rows: number) => invoke<number>("term_open", { cols, rows }),
   termWrite: (id: number, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: number, cols: number, rows: number) =>
@@ -137,6 +141,26 @@ export interface McpInfo {
   /** null = CLI không có trên PATH. */
   claude_registered: boolean | null;
   codex_registered: boolean | null;
+}
+
+export interface SkillInfo {
+  name: string;
+  /** Câu đầu của `description` trong frontmatter SKILL.md. */
+  description: string;
+}
+
+export interface PluginInfo {
+  /** Marketplace local đã materialize — thư mục được đăng ký với CLI. */
+  dir: string;
+  vault: string;
+  /** `second-brain@second-brain-app` */
+  id: string;
+  skills: SkillInfo[];
+  /** null = CLI không có trên PATH. */
+  claude_installed: boolean | null;
+  codex_installed: boolean | null;
+  claude_cmds: string[];
+  codex_cmds: string[];
 }
 
 export interface LlmSettings {

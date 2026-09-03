@@ -16,6 +16,7 @@ import {
   type JanitorReport,
   type LlmSettings,
   type McpInfo,
+  type PluginInfo,
   type NoteMeta,
   type RelatedNote,
   type RevisionMeta,
@@ -208,6 +209,11 @@ export default function App() {
   const [mcp, setMcp] = createSignal<McpInfo | null>(null);
   const [mcpBusy, setMcpBusy] = createSignal<string | null>(null);
   const [mcpShowManual, setMcpShowManual] = createSignal(false);
+  // Plugin: skill + MCP đóng gói, cài qua marketplace của chính CLI.
+  const [plugin, setPlugin] = createSignal<PluginInfo | null>(null);
+  const [pluginBusy, setPluginBusy] = createSignal<string | null>(null);
+  const [pluginShowManual, setPluginShowManual] = createSignal(false);
+  const [setupBusy, setSetupBusy] = createSignal(false);
   const [janitorOpen, setJanitorOpen] = createSignal(false);
   const [janitorReport, setJanitorReport] = createSignal<JanitorReport | null>(null);
   const [janitorBusy, setJanitorBusy] = createSignal(false);
@@ -1579,6 +1585,8 @@ export default function App() {
     // Kiểm tra đăng ký MCP chạy `claude mcp get` (~1s) — không chặn phần trên.
     setMcp(null);
     api.mcpInfo().then(setMcp).catch(() => setMcp(null));
+    setPlugin(null);
+    api.pluginInfo().then(setPlugin).catch(() => setPlugin(null));
   };
 
   /** Đăng ký / gỡ MCP server của vault với một agent CLI. */
@@ -1598,6 +1606,60 @@ export default function App() {
       say(String(e));
     } finally {
       setMcpBusy(null);
+    }
+  };
+
+  /** Cài / gỡ plugin skill với một agent CLI. */
+  const pluginToggle = async (cli: "claude" | "codex") => {
+    const installed = cli === "claude" ? plugin()?.claude_installed : plugin()?.codex_installed;
+    setPluginBusy(cli);
+    try {
+      if (installed) {
+        await api.pluginUninstall(cli);
+        say(`Đã gỡ plugin second-brain khỏi ${cli}`);
+      } else {
+        await api.pluginInstall(cli);
+        say(`Đã cài plugin second-brain vào ${cli} — mở phiên ${cli} mới để nhận skill`);
+      }
+      setPlugin(await api.pluginInfo());
+    } catch (e) {
+      say(String(e));
+    } finally {
+      setPluginBusy(null);
+    }
+  };
+
+  /**
+   * Một nút lo đủ: với mọi CLI có trên máy, đăng ký MCP server rồi cài plugin skill.
+   * Bỏ qua phần đã có sẵn nên bấm lại nhiều lần vẫn an toàn.
+   */
+  const setupAll = async () => {
+    setSetupBusy(true);
+    const done: string[] = [];
+    const failed: string[] = [];
+    try {
+      for (const cli of ["claude", "codex"] as const) {
+        const m = mcp();
+        const pl = plugin();
+        const hasCli = cli === "claude" ? m?.claude_registered !== null : m?.codex_registered !== null;
+        if (!hasCli) continue;
+        try {
+          const reg = cli === "claude" ? m?.claude_registered : m?.codex_registered;
+          if (!reg) await api.mcpRegister(cli);
+          const ins = cli === "claude" ? pl?.claude_installed : pl?.codex_installed;
+          if (!ins) await api.pluginInstall(cli);
+          done.push(cli);
+        } catch (e) {
+          failed.push(`${cli}: ${String(e)}`);
+        }
+      }
+      setMcp(await api.mcpInfo().catch(() => null));
+      setPlugin(await api.pluginInfo().catch(() => null));
+      if (failed.length) say(`Lỗi khi cài — ${failed.join(" | ")}`);
+      else if (done.length) say(`Đã cài MCP + plugin cho ${done.join(", ")} — mở phiên CLI mới để dùng`);
+      else say("Không thấy Claude Code hay Codex trên PATH");
+    } finally {
+      setSetupBusy(false);
     }
   };
 
@@ -1989,6 +2051,255 @@ export default function App() {
           )}
         </Show>
         <TermPanel visible={termVisible()} onClose={() => setTermVisible(false)} />
+        <Show when={settingsOpen()}>
+          <div class="settings-page">
+            <div class="settings-page-head">
+              <span class="settings-page-title">Settings</span>
+              <button
+                class="settings-page-close"
+                title="Đóng (Esc)"
+                onClick={() => setSettingsOpen(false)}
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div class="settings-page-body">
+              <div class="settings-section">Giao diện</div>
+              <div class="theme-choices">
+                <For
+                  each={
+                    [
+                      { v: "system", label: "Theo hệ thống", icon: IconSystemTheme },
+                      { v: "light", label: "Sáng", icon: IconLight },
+                      { v: "dark", label: "Tối", icon: IconDark },
+                    ] as { v: ThemePref; label: string; icon: typeof IconLight }[]
+                  }
+                >
+                  {(opt) => (
+                    <button
+                      class="theme-choice"
+                      classList={{ active: themePref() === opt.v }}
+                      onClick={() => setThemePref(opt.v)}
+                    >
+                      <opt.icon />
+                      <span>{opt.label}</span>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="settings-section">LLM cho hỏi đáp & reasoning search</div>
+              <For
+                each={[
+                  { v: "auto", label: "Tự động (ưu tiên Claude)" },
+                  { v: "claude", label: "Claude Code CLI" },
+                  { v: "codex", label: "Codex CLI" },
+                ]}
+              >
+                {(opt) => (
+                  <label
+                    class="settings-option"
+                    classList={{
+                      disabled:
+                        (opt.v === "claude" && llm() ? !llm()!.claude_ok : false) ||
+                        (opt.v === "codex" && llm() ? !llm()!.codex_ok : false),
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="llm"
+                      checked={llm()?.pref === opt.v || (!llm()?.pref && opt.v === "auto")}
+                      onChange={() => choosePref(opt.v)}
+                    />
+                    <span class="settings-label">{opt.label}</span>
+                    <span
+                      class="settings-state"
+                      classList={{
+                        ok: (opt.v === "claude" && !!llm()?.claude_ok) || (opt.v === "codex" && !!llm()?.codex_ok),
+                        missing:
+                          (opt.v === "claude" && llm() != null && !llm()!.claude_ok) ||
+                          (opt.v === "codex" && llm() != null && !llm()!.codex_ok),
+                      }}
+                    >
+                      {opt.v === "claude" && (llm()?.claude_ok ? <><IconOk /> có sẵn</> : <><IconClose /> không thấy trên PATH</>)}
+                      {opt.v === "codex" && (llm()?.codex_ok ? <><IconOk /> có sẵn</> : <><IconClose /> không thấy trên PATH</>)}
+                    </span>
+                  </label>
+                )}
+              </For>
+              <div class="settings-active">
+                Đang dùng: <b>{llm()?.active ?? "không có provider nào"}</b>
+              </div>
+
+              <div class="settings-section">Agent ngoài — Claude Code / Codex</div>
+              <div class="settings-hint">
+                Một nút lo đủ cho mọi CLI có trên máy: <b>MCP server</b> (công cụ thao tác
+                vault) và <b>plugin skill</b> (dạy agent quy ước của vault). Bấm lại lúc nào
+                cũng được — phần đã có sẵn sẽ bỏ qua. Mở phiên CLI mới để nhận.
+              </div>
+              <button
+                class="settings-primary"
+                disabled={setupBusy() || mcpBusy() !== null || pluginBusy() !== null}
+                onClick={setupAll}
+              >
+                {setupBusy() ? "Đang cài…" : "Cài đặt tất cả"}
+              </button>
+
+              <div class="settings-section">MCP server — cho agent ngoài thao tác vault</div>
+              <div class="settings-hint">
+                Claude Code / Codex chạy ở bất kỳ thư mục nào cũng tìm, đọc, sửa, đổi tên (tự
+                rewrite wikilink), chạy janitor… trên vault này qua tool có cấu trúc. Terminal
+                và chat agent trong app đã được cắm sẵn.
+              </div>
+              <Show
+                when={mcp()}
+                fallback={<div class="settings-active">Đang kiểm tra trạng thái đăng ký…</div>}
+              >
+                {(m) => (
+                  <>
+                    <For
+                      each={[
+                        { cli: "claude" as const, label: "Claude Code CLI", reg: m().claude_registered },
+                        { cli: "codex" as const, label: "Codex CLI", reg: m().codex_registered },
+                      ]}
+                    >
+                      {(row) => (
+                        <div class="settings-option mcp-row" classList={{ disabled: row.reg === null }}>
+                          <span class="settings-label">{row.label}</span>
+                          <span
+                            class="settings-state"
+                            classList={{ ok: row.reg === true, missing: row.reg === null }}
+                          >
+                            {row.reg === null ? (
+                              <><IconClose /> không thấy trên PATH</>
+                            ) : row.reg ? (
+                              <><IconOk /> đã đăng ký</>
+                            ) : (
+                              "chưa đăng ký"
+                            )}
+                          </span>
+                          <button
+                            class="mcp-btn"
+                            disabled={row.reg === null || mcpBusy() !== null}
+                            onClick={() => mcpToggle(row.cli)}
+                          >
+                            {mcpBusy() === row.cli ? "…" : row.reg ? "Gỡ" : "Đăng ký"}
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                    <button class="mcp-manual-toggle" onClick={() => setMcpShowManual(!mcpShowManual())}>
+                      {mcpShowManual() ? "Ẩn" : "Hiện"} lệnh đăng ký tay / config cho client khác
+                    </button>
+                    <Show when={mcpShowManual()}>
+                      <For
+                        each={[
+                          { title: "Claude Code", text: m().claude_cmd },
+                          { title: "Codex", text: m().codex_cmd },
+                          { title: "JSON (Cursor, Claude Desktop…)", text: m().json_config },
+                        ]}
+                      >
+                        {(snip) => (
+                          <div class="mcp-snippet">
+                            <div class="mcp-snippet-head">
+                              <span>{snip.title}</span>
+                              <button title="Copy" onClick={() => copyText(snip.text, "cấu hình MCP")}>
+                                <IconCopy />
+                              </button>
+                            </div>
+                            <pre>{snip.text}</pre>
+                          </div>
+                        )}
+                      </For>
+                    </Show>
+                  </>
+                )}
+              </Show>
+
+              <div class="settings-section">Plugin skill — dạy agent dùng vault cho đúng</div>
+              <div class="settings-hint">
+                Chỉ có tool thì agent vẫn đoán sai quy ước: path tương đối, wikilink theo tên
+                file, đổi tên phải dùng <code>rename_note</code> để không gãy link… Plugin
+                đóng gói phần đó thành skill và cài qua chính marketplace của từng CLI.
+              </div>
+              <Show
+                when={plugin()}
+                fallback={<div class="settings-active">Đang kiểm tra trạng thái cài…</div>}
+              >
+                {(p) => (
+                  <>
+                    <For
+                      each={[
+                        { cli: "claude" as const, label: "Claude Code CLI", ins: p().claude_installed },
+                        { cli: "codex" as const, label: "Codex CLI", ins: p().codex_installed },
+                      ]}
+                    >
+                      {(row) => (
+                        <div class="settings-option mcp-row" classList={{ disabled: row.ins === null }}>
+                          <span class="settings-label">{row.label}</span>
+                          <span
+                            class="settings-state"
+                            classList={{ ok: row.ins === true, missing: row.ins === null }}
+                          >
+                            {row.ins === null ? (
+                              <><IconClose /> không thấy trên PATH</>
+                            ) : row.ins ? (
+                              <><IconOk /> đã cài</>
+                            ) : (
+                              "chưa cài"
+                            )}
+                          </span>
+                          <button
+                            class="mcp-btn"
+                            disabled={row.ins === null || pluginBusy() !== null}
+                            onClick={() => pluginToggle(row.cli)}
+                          >
+                            {pluginBusy() === row.cli ? "…" : row.ins ? "Gỡ" : "Cài"}
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                    <div class="plugin-skills">
+                      <For each={p().skills}>
+                        {(sk) => (
+                          <div class="plugin-skill">
+                            <code>{sk.name}</code>
+                            <span>{sk.description}</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                    <button
+                      class="mcp-manual-toggle"
+                      onClick={() => setPluginShowManual(!pluginShowManual())}
+                    >
+                      {pluginShowManual() ? "Ẩn" : "Hiện"} lệnh cài tay
+                    </button>
+                    <Show when={pluginShowManual()}>
+                      <For
+                        each={[
+                          { title: "Claude Code", text: p().claude_cmds.join("\n") },
+                          { title: "Codex", text: p().codex_cmds.join("\n") },
+                        ]}
+                      >
+                        {(snip) => (
+                          <div class="mcp-snippet">
+                            <div class="mcp-snippet-head">
+                              <span>{snip.title}</span>
+                              <button title="Copy" onClick={() => copyText(snip.text, "lệnh cài plugin")}>
+                                <IconCopy />
+                              </button>
+                            </div>
+                            <pre>{snip.text}</pre>
+                          </div>
+                        )}
+                      </For>
+                    </Show>
+                  </>
+                )}
+              </Show>
+            </div>
+          </div>
+        </Show>
       </main>
 
       <aside class="rightbar">
@@ -2229,152 +2540,6 @@ export default function App() {
               <button class="vault-browse" onClick={pickVault}>
                 Chọn thư mục khác…
               </button>
-            </div>
-          </div>
-        </div>
-      </Show>
-
-      <Show when={settingsOpen()}>
-        <div class="overlay" onClick={() => setSettingsOpen(false)}>
-          <div class="prompt-modal settings-modal" onClick={(e) => e.stopPropagation()}>
-            <div class="prompt-title">Settings</div>
-            <div class="settings-body">
-              <div class="settings-section">Giao diện</div>
-              <div class="theme-choices">
-                <For
-                  each={
-                    [
-                      { v: "system", label: "Theo hệ thống", icon: IconSystemTheme },
-                      { v: "light", label: "Sáng", icon: IconLight },
-                      { v: "dark", label: "Tối", icon: IconDark },
-                    ] as { v: ThemePref; label: string; icon: typeof IconLight }[]
-                  }
-                >
-                  {(opt) => (
-                    <button
-                      class="theme-choice"
-                      classList={{ active: themePref() === opt.v }}
-                      onClick={() => setThemePref(opt.v)}
-                    >
-                      <opt.icon />
-                      <span>{opt.label}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
-              <div class="settings-section">LLM cho hỏi đáp & reasoning search</div>
-              <For
-                each={[
-                  { v: "auto", label: "Tự động (ưu tiên Claude)" },
-                  { v: "claude", label: "Claude Code CLI" },
-                  { v: "codex", label: "Codex CLI" },
-                ]}
-              >
-                {(opt) => (
-                  <label
-                    class="settings-option"
-                    classList={{
-                      disabled:
-                        (opt.v === "claude" && llm() ? !llm()!.claude_ok : false) ||
-                        (opt.v === "codex" && llm() ? !llm()!.codex_ok : false),
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="llm"
-                      checked={llm()?.pref === opt.v || (!llm()?.pref && opt.v === "auto")}
-                      onChange={() => choosePref(opt.v)}
-                    />
-                    <span class="settings-label">{opt.label}</span>
-                    <span
-                      class="settings-state"
-                      classList={{
-                        ok: (opt.v === "claude" && !!llm()?.claude_ok) || (opt.v === "codex" && !!llm()?.codex_ok),
-                        missing:
-                          (opt.v === "claude" && llm() != null && !llm()!.claude_ok) ||
-                          (opt.v === "codex" && llm() != null && !llm()!.codex_ok),
-                      }}
-                    >
-                      {opt.v === "claude" && (llm()?.claude_ok ? <><IconOk /> có sẵn</> : <><IconClose /> không thấy trên PATH</>)}
-                      {opt.v === "codex" && (llm()?.codex_ok ? <><IconOk /> có sẵn</> : <><IconClose /> không thấy trên PATH</>)}
-                    </span>
-                  </label>
-                )}
-              </For>
-              <div class="settings-active">
-                Đang dùng: <b>{llm()?.active ?? "không có provider nào"}</b>
-              </div>
-
-              <div class="settings-section">MCP server — cho agent ngoài thao tác vault</div>
-              <div class="settings-hint">
-                Claude Code / Codex chạy ở bất kỳ thư mục nào cũng tìm, đọc, sửa, đổi tên (tự
-                rewrite wikilink), chạy janitor… trên vault này qua tool có cấu trúc. Terminal
-                và chat agent trong app đã được cắm sẵn.
-              </div>
-              <Show
-                when={mcp()}
-                fallback={<div class="settings-active">Đang kiểm tra trạng thái đăng ký…</div>}
-              >
-                {(m) => (
-                  <>
-                    <For
-                      each={[
-                        { cli: "claude" as const, label: "Claude Code CLI", reg: m().claude_registered },
-                        { cli: "codex" as const, label: "Codex CLI", reg: m().codex_registered },
-                      ]}
-                    >
-                      {(row) => (
-                        <div class="settings-option mcp-row" classList={{ disabled: row.reg === null }}>
-                          <span class="settings-label">{row.label}</span>
-                          <span
-                            class="settings-state"
-                            classList={{ ok: row.reg === true, missing: row.reg === null }}
-                          >
-                            {row.reg === null ? (
-                              <><IconClose /> không thấy trên PATH</>
-                            ) : row.reg ? (
-                              <><IconOk /> đã đăng ký</>
-                            ) : (
-                              "chưa đăng ký"
-                            )}
-                          </span>
-                          <button
-                            class="mcp-btn"
-                            disabled={row.reg === null || mcpBusy() !== null}
-                            onClick={() => mcpToggle(row.cli)}
-                          >
-                            {mcpBusy() === row.cli ? "…" : row.reg ? "Gỡ" : "Đăng ký"}
-                          </button>
-                        </div>
-                      )}
-                    </For>
-                    <button class="mcp-manual-toggle" onClick={() => setMcpShowManual(!mcpShowManual())}>
-                      {mcpShowManual() ? "Ẩn" : "Hiện"} lệnh đăng ký tay / config cho client khác
-                    </button>
-                    <Show when={mcpShowManual()}>
-                      <For
-                        each={[
-                          { title: "Claude Code", text: m().claude_cmd },
-                          { title: "Codex", text: m().codex_cmd },
-                          { title: "JSON (Cursor, Claude Desktop…)", text: m().json_config },
-                        ]}
-                      >
-                        {(snip) => (
-                          <div class="mcp-snippet">
-                            <div class="mcp-snippet-head">
-                              <span>{snip.title}</span>
-                              <button title="Copy" onClick={() => copyText(snip.text, "cấu hình MCP")}>
-                                <IconCopy />
-                              </button>
-                            </div>
-                            <pre>{snip.text}</pre>
-                          </div>
-                        )}
-                      </For>
-                    </Show>
-                  </>
-                )}
-              </Show>
             </div>
           </div>
         </div>

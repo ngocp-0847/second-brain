@@ -425,6 +425,7 @@ details[open] > .tree-dir .tree-dir-arrow {
 /* ---- editor ---- */
 .main {
   grid-row: 1;
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1991,8 +1992,67 @@ details[open] > .tree-dir .tree-dir-arrow {
   width: min(640px, 92vw);
 }
 
+/* Modal Vault vẫn dùng class này — giữ nguyên, đừng gộp với .settings-page-body. */
 .settings-body {
   padding: var(--sp-sm) 14px var(--sp-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-sm);
+}
+
+/* ---- Settings: page phủ vùng nội dung, KHÔNG phải modal ----
+   Modal bị kẹt trong viewport nên nội dung dài bị cắt mất phần dưới. Page thì có
+   header cố định + body cuộn riêng, dài bao nhiêu cũng đọc hết được. */
+.settings-page {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.settings-page-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  padding: var(--sp-sm) var(--sp-md);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-ribbon);
+}
+
+.settings-page-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-strong);
+}
+
+.settings-page-close {
+  display: flex;
+  padding: var(--sp-xs);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.settings-page-close:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.settings-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto;
+  padding: var(--sp-md) var(--sp-md) 48px;
   display: flex;
   flex-direction: column;
   gap: var(--sp-sm);
@@ -2061,6 +2121,53 @@ details[open] > .tree-dir .tree-dir-arrow {
   color: var(--fg-muted);
   font-size: 12.5px;
   line-height: 1.45;
+}
+
+.settings-primary {
+  align-self: flex-start;
+  padding: 7px 16px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-md);
+  background: var(--accent-bg);
+  color: var(--fg-strong);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-primary:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+.settings-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Danh sách skill mà plugin mang theo — thuần thông tin, không bấm được. */
+.plugin-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 2px;
+}
+
+.plugin-skill {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.4;
+}
+
+.plugin-skill code {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  background: var(--hover-soft);
+  color: var(--fg-strong);
+  font-size: 11.5px;
 }
 
 .mcp-row {

@@ -5,6 +5,7 @@ mod agent;
 mod git;
 mod history;
 pub mod mcp_setup;
+mod plugin_setup;
 mod terminal;
 mod watch;
 
@@ -621,6 +622,25 @@ fn mcp_unregister(cli: String) -> CmdResult<String> {
     mcp_setup::unregister(&cli).map_err(err)
 }
 
+/// Plugin (skill + MCP) của vault: skill có sẵn, đã cài trên CLI nào, lệnh cài tay.
+#[tauri::command(async)]
+fn plugin_info(app: AppHandle, state: State<AppState>) -> CmdResult<plugin_setup::PluginInfo> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    plugin_setup::info(&app, &root).map_err(err)
+}
+
+/// Materialize plugin cho vault đang mở rồi nhờ chính CLI cài vào hệ thống.
+#[tauri::command(async)]
+fn plugin_install(cli: String, app: AppHandle, state: State<AppState>) -> CmdResult<String> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    plugin_setup::install(&cli, &app, &root).map_err(err)
+}
+
+#[tauri::command(async)]
+fn plugin_uninstall(cli: String) -> CmdResult<String> {
+    plugin_setup::uninstall(&cli).map_err(err)
+}
+
 /// Sửa vùng chọn trong editor bằng agent: trả về text mới cho ĐÚNG vùng đó,
 /// UI tự thay vào (không ghi file ở đây → Ctrl+Z hoàn tác được).
 #[tauri::command(async)]
@@ -898,6 +918,9 @@ pub fn run() {
             mcp_info,
             mcp_register,
             mcp_unregister,
+            plugin_info,
+            plugin_install,
+            plugin_uninstall,
             note_history,
             history_get,
             term_open,
