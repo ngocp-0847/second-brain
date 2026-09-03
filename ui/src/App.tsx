@@ -15,6 +15,7 @@ import {
   type Backlink,
   type JanitorReport,
   type LlmSettings,
+  type McpInfo,
   type NoteMeta,
   type RelatedNote,
   type RevisionMeta,
@@ -36,6 +37,7 @@ import {
   IconBullets,
   IconCanvas,
   IconClose,
+  IconCopy,
   IconCopyPath,
   IconDaily,
   IconDark,
@@ -202,6 +204,10 @@ export default function App() {
   // Settings + Janitor
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [llm, setLlm] = createSignal<LlmSettings | null>(null);
+  // MCP: trạng thái đăng ký server của vault với Claude Code / Codex.
+  const [mcp, setMcp] = createSignal<McpInfo | null>(null);
+  const [mcpBusy, setMcpBusy] = createSignal<string | null>(null);
+  const [mcpShowManual, setMcpShowManual] = createSignal(false);
   const [janitorOpen, setJanitorOpen] = createSignal(false);
   const [janitorReport, setJanitorReport] = createSignal<JanitorReport | null>(null);
   const [janitorBusy, setJanitorBusy] = createSignal(false);
@@ -1570,6 +1576,29 @@ export default function App() {
     } catch (e) {
       say(String(e));
     }
+    // Kiểm tra đăng ký MCP chạy `claude mcp get` (~1s) — không chặn phần trên.
+    setMcp(null);
+    api.mcpInfo().then(setMcp).catch(() => setMcp(null));
+  };
+
+  /** Đăng ký / gỡ MCP server của vault với một agent CLI. */
+  const mcpToggle = async (cli: "claude" | "codex") => {
+    const registered = cli === "claude" ? mcp()?.claude_registered : mcp()?.codex_registered;
+    setMcpBusy(cli);
+    try {
+      if (registered) {
+        await api.mcpUnregister(cli);
+        say(`Đã gỡ MCP server khỏi ${cli}`);
+      } else {
+        await api.mcpRegister(cli);
+        say(`Đã đăng ký MCP server "second-brain" với ${cli} — mở phiên ${cli} mới để dùng`);
+      }
+      setMcp(await api.mcpInfo());
+    } catch (e) {
+      say(String(e));
+    } finally {
+      setMcpBusy(null);
+    }
   };
 
   const choosePref = async (pref: string) => {
@@ -2275,6 +2304,77 @@ export default function App() {
               <div class="settings-active">
                 Đang dùng: <b>{llm()?.active ?? "không có provider nào"}</b>
               </div>
+
+              <div class="settings-section">MCP server — cho agent ngoài thao tác vault</div>
+              <div class="settings-hint">
+                Claude Code / Codex chạy ở bất kỳ thư mục nào cũng tìm, đọc, sửa, đổi tên (tự
+                rewrite wikilink), chạy janitor… trên vault này qua tool có cấu trúc. Terminal
+                và chat agent trong app đã được cắm sẵn.
+              </div>
+              <Show
+                when={mcp()}
+                fallback={<div class="settings-active">Đang kiểm tra trạng thái đăng ký…</div>}
+              >
+                {(m) => (
+                  <>
+                    <For
+                      each={[
+                        { cli: "claude" as const, label: "Claude Code CLI", reg: m().claude_registered },
+                        { cli: "codex" as const, label: "Codex CLI", reg: m().codex_registered },
+                      ]}
+                    >
+                      {(row) => (
+                        <div class="settings-option mcp-row" classList={{ disabled: row.reg === null }}>
+                          <span class="settings-label">{row.label}</span>
+                          <span
+                            class="settings-state"
+                            classList={{ ok: row.reg === true, missing: row.reg === null }}
+                          >
+                            {row.reg === null ? (
+                              <><IconClose /> không thấy trên PATH</>
+                            ) : row.reg ? (
+                              <><IconOk /> đã đăng ký</>
+                            ) : (
+                              "chưa đăng ký"
+                            )}
+                          </span>
+                          <button
+                            class="mcp-btn"
+                            disabled={row.reg === null || mcpBusy() !== null}
+                            onClick={() => mcpToggle(row.cli)}
+                          >
+                            {mcpBusy() === row.cli ? "…" : row.reg ? "Gỡ" : "Đăng ký"}
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                    <button class="mcp-manual-toggle" onClick={() => setMcpShowManual(!mcpShowManual())}>
+                      {mcpShowManual() ? "Ẩn" : "Hiện"} lệnh đăng ký tay / config cho client khác
+                    </button>
+                    <Show when={mcpShowManual()}>
+                      <For
+                        each={[
+                          { title: "Claude Code", text: m().claude_cmd },
+                          { title: "Codex", text: m().codex_cmd },
+                          { title: "JSON (Cursor, Claude Desktop…)", text: m().json_config },
+                        ]}
+                      >
+                        {(snip) => (
+                          <div class="mcp-snippet">
+                            <div class="mcp-snippet-head">
+                              <span>{snip.title}</span>
+                              <button title="Copy" onClick={() => copyText(snip.text, "cấu hình MCP")}>
+                                <IconCopy />
+                              </button>
+                            </div>
+                            <pre>{snip.text}</pre>
+                          </div>
+                        )}
+                      </For>
+                    </Show>
+                  </>
+                )}
+              </Show>
             </div>
           </div>
         </div>

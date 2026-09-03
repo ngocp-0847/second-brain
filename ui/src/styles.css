@@ -2056,6 +2056,87 @@ details[open] > .tree-dir .tree-dir-arrow {
   font-size: 12.5px;
 }
 
+/* ---- MCP trong Settings ---- */
+.settings-hint {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.mcp-row {
+  cursor: default;
+}
+
+.mcp-row .settings-state {
+  margin-left: auto;
+}
+
+.mcp-btn {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg-strong);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.mcp-btn:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.mcp-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mcp-manual-toggle {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+
+.mcp-snippet {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.mcp-snippet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 4px 10px;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  background: var(--hover-soft);
+}
+
+.mcp-snippet-head button {
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.mcp-snippet pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fg-strong);
+}
+
 /* ---- history modal (🕘 revision) ---- */
 .history-modal {
   width: min(860px, 94vw);

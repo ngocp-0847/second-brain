@@ -4,6 +4,7 @@
 mod agent;
 mod git;
 mod history;
+pub mod mcp_setup;
 mod terminal;
 mod watch;
 
@@ -587,8 +588,37 @@ fn agent_chat(
     let root = with_vault(&state, |v| Ok(v.root.clone()))?;
     // Lưới an toàn: git snapshot cả vault trước khi cho agent sửa file.
     let _ = janitor::snapshot(&root, "agent");
-    agent::chat(&app, provider, &root, &message, context_path.as_deref(), session_id.as_deref())
-        .map_err(err)
+    // Agent headless được cắm MCP server của vault: search/backlinks/rename có rewrite link…
+    let mcp_cfg = mcp_setup::write_config(&root).ok();
+    agent::chat(
+        &app,
+        provider,
+        &root,
+        &message,
+        context_path.as_deref(),
+        session_id.as_deref(),
+        mcp_cfg.as_deref(),
+    )
+    .map_err(err)
+}
+
+/// Thông tin MCP server của vault đang mở: exe, lệnh đăng ký, trạng thái từng CLI.
+#[tauri::command(async)]
+fn mcp_info(state: State<AppState>) -> CmdResult<mcp_setup::McpInfo> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    mcp_setup::info(&root).map_err(err)
+}
+
+/// Đăng ký server với `claude` hoặc `codex` (scope user — dùng được ở mọi thư mục).
+#[tauri::command(async)]
+fn mcp_register(cli: String, state: State<AppState>) -> CmdResult<String> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    mcp_setup::register(&cli, &root).map_err(err)
+}
+
+#[tauri::command(async)]
+fn mcp_unregister(cli: String) -> CmdResult<String> {
+    mcp_setup::unregister(&cli).map_err(err)
 }
 
 /// Sửa vùng chọn trong editor bằng agent: trả về text mới cho ĐÚNG vùng đó,
@@ -621,9 +651,19 @@ fn term_open(
     term: State<terminal::TermState>,
 ) -> CmdResult<u32> {
     let cwd = state.vault.lock().ok().and_then(|g| g.as_ref().map(|v| v.root.clone()));
-    // Có claude → gõ sẵn lệnh vào phiên, kèm hook để app biết Claude sửa note nào.
-    let startup = qa::provider_available(qa::Provider::ClaudeCli)
-        .then(|| watch::claude_command(cwd.as_deref()));
+    // Có claude → gõ sẵn lệnh vào phiên: hook để app biết Claude sửa note nào, kèm
+    // `--mcp-config` cắm MCP server của vault (không cần đăng ký tay).
+    let startup = qa::provider_available(qa::Provider::ClaudeCli).then(|| {
+        let mut line = watch::claude_command(cwd.as_deref());
+        if let Some(cfg) = cwd.as_deref().and_then(|r| mcp_setup::write_config(r).ok()) {
+            // Dấu `/` để chuỗi chạy được dù shell nào thực thi, giống watch::claude_command.
+            line.push_str(&format!(
+                " --mcp-config \"{}\"",
+                cfg.to_string_lossy().replace('\\', "/")
+            ));
+        }
+        line
+    });
     terminal::open(app, &term, cwd, cols, rows, startup).map_err(err)
 }
 
@@ -855,6 +895,9 @@ pub fn run() {
             git_sync,
             agent_chat,
             agent_transform,
+            mcp_info,
+            mcp_register,
+            mcp_unregister,
             note_history,
             history_get,
             term_open,

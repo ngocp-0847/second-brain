@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 vault-core = { path = "../crates/vault-core" }
 qa = { path = "../crates/qa" }
 janitor = { path = "../crates/janitor" }
+mcp = { path = "../crates/mcp" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"

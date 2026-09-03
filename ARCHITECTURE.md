@@ -94,6 +94,7 @@ second-brain/
 │   ├── search/          # BM25 search, query parser
 │   ├── qa/              # RAG: retrieve → generate + citations
 │   ├── janitor/         # rule engine lint + restructure planner/executor
+│   ├── mcp/             # MCP server (stdio): tools/resources/prompts cho agent ngoài
 │   └── ipc-types/       # struct chia sẻ (serde) giữa core và UI
 ├── src-tauri/           # Tauri shell, wiring, scheduler
 └── ui/                  # SolidJS + CodeMirror 6
@@ -267,6 +268,17 @@ Sáng ──▶ user mở app: banner report — mỗi action có [Giữ] [Hoàn
 
 - Chạy bằng scheduler trong app (nếu app đang mở) **hoặc** headless: `brain janitor --vault <path>` qua cron/Task Scheduler — core tách khỏi UI nên CLI dùng chung crates.
 - Nút "Luôn cho phép" nâng rule từ `propose` → `auto` dần dần: janitor **học mức tin tưởng** từ hành vi duyệt của người dùng.
+
+---
+
+## 8b. MCP — "API mở" cho agent
+
+Non-goal "plugin ecosystem" được thay bằng một bề mặt chuẩn: vault là **MCP server** (crate `mcp`, transport stdio). Cùng một server chạy được hai đường — `brain mcp` và chính exe của app với cờ `--mcp --vault <path>` (không cần cài thêm binary; Settings đăng ký một nút với `claude mcp add` / `codex mcp add`).
+
+- **Tools** phủ toàn bộ command của app: đọc/tìm (BM25, related, backlinks, graph, RAG retrieve), ghi/sửa (`replace_in_note` khớp chính xác, `append_note` theo heading, `rename_note` rewrite link), bảo trì (index, snapshot, janitor). `--read-only` ẩn tool ghi.
+- **Resources** `brain://note/{path}`; **Prompts** nhúng ngữ cảnh đã retrieve để client tự sinh — server không bắt buộc gọi LLM.
+- **An toàn** đi qua đúng đường của app: xóa = trash, snapshot git trước thao tác phá hủy, chặn traversal và thư mục hệ thống. App và server dùng chung `cache.db` (WAL + `busy_timeout`).
+- Terminal và chat agent trong app được cắm server qua `--mcp-config .brain/mcp.json`, nên Claude Code chạy từ app dùng tool có cấu trúc thay vì `Bash` mò file.
 
 ---
 

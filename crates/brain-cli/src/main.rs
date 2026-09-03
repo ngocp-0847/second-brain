@@ -47,11 +47,27 @@ enum Cmd {
     Stats,
     /// Theo dõi vault và re-index khi file thay đổi
     Watch,
+    /// Chạy MCP server (stdio) để agent ngoài (Claude Code, Codex…) thao tác vault.
+    /// Đăng ký: `claude mcp add second-brain -- brain mcp --vault <path>`
+    Mcp {
+        /// Chỉ expose tool đọc (search/read/graph…), ẩn mọi tool ghi
+        #[arg(long)]
+        read_only: bool,
+        /// Provider cho tool ask_vault: auto | claude | codex
+        #[arg(long, default_value = "auto")]
+        llm: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.vault.unwrap_or_else(|| std::env::current_dir().unwrap());
+
+    // MCP: stdout là kênh JSON-RPC nên không in gì khác; server tự mở + index vault.
+    if let Cmd::Mcp { read_only, llm } = cli.cmd {
+        return mcp::serve_stdio(&root, mcp::Options { read_only, llm_pref: llm });
+    }
+
     let mut vault = Vault::open(&root)?;
 
     // Mọi lệnh query đều index trước cho tươi — index tăng dần nên gần như miễn phí.
@@ -198,6 +214,7 @@ fn main() -> Result<()> {
                 println!("re-indexed: {} updated, {} removed ({} ms)", s.updated, s.removed, s.duration_ms);
             })?;
         }
+        Cmd::Mcp { .. } => unreachable!("đã xử lý ở trên"),
     }
     Ok(())
 }
