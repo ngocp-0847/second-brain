@@ -1,0 +1,17 @@
+{
+  "name": "second-brain",
+  "version": "0.1.0",
+  "description": "Thao tác vault ghi chú Markdown của app Second Brain: tìm kiếm/RAG, đọc–ghi note, wikilink, backlinks, canvas, janitor — qua MCP server chạy từ chính app.",
+  "author": {
+    "name": "Second Brain"
+  },
+  "keywords": [
+    "notes",
+    "markdown",
+    "obsidian",
+    "vault",
+    "knowledge-base",
+    "second-brain"
+  ],
+  "mcpServers": "./mcp.json"
+}

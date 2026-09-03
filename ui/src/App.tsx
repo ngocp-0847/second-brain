@@ -16,6 +16,7 @@ import {
   type JanitorReport,
   type LlmSettings,
   type McpInfo,
+  type PluginInfo,
   type NoteMeta,
   type RelatedNote,
   type RevisionMeta,
@@ -208,6 +209,11 @@ export default function App() {
   const [mcp, setMcp] = createSignal<McpInfo | null>(null);
   const [mcpBusy, setMcpBusy] = createSignal<string | null>(null);
   const [mcpShowManual, setMcpShowManual] = createSignal(false);
+  // Plugin: skill + MCP đóng gói, cài qua marketplace của chính CLI.
+  const [plugin, setPlugin] = createSignal<PluginInfo | null>(null);
+  const [pluginBusy, setPluginBusy] = createSignal<string | null>(null);
+  const [pluginShowManual, setPluginShowManual] = createSignal(false);
+  const [setupBusy, setSetupBusy] = createSignal(false);
   const [janitorOpen, setJanitorOpen] = createSignal(false);
   const [janitorReport, setJanitorReport] = createSignal<JanitorReport | null>(null);
   const [janitorBusy, setJanitorBusy] = createSignal(false);
@@ -1579,6 +1585,8 @@ export default function App() {
     // Kiểm tra đăng ký MCP chạy `claude mcp get` (~1s) — không chặn phần trên.
     setMcp(null);
     api.mcpInfo().then(setMcp).catch(() => setMcp(null));
+    setPlugin(null);
+    api.pluginInfo().then(setPlugin).catch(() => setPlugin(null));
   };
 
   /** Đăng ký / gỡ MCP server của vault với một agent CLI. */
@@ -1598,6 +1606,60 @@ export default function App() {
       say(String(e));
     } finally {
       setMcpBusy(null);
+    }
+  };
+
+  /** Cài / gỡ plugin skill với một agent CLI. */
+  const pluginToggle = async (cli: "claude" | "codex") => {
+    const installed = cli === "claude" ? plugin()?.claude_installed : plugin()?.codex_installed;
+    setPluginBusy(cli);
+    try {
+      if (installed) {
+        await api.pluginUninstall(cli);
+        say(`Đã gỡ plugin second-brain khỏi ${cli}`);
+      } else {
+        await api.pluginInstall(cli);
+        say(`Đã cài plugin second-brain vào ${cli} — mở phiên ${cli} mới để nhận skill`);
+      }
+      setPlugin(await api.pluginInfo());
+    } catch (e) {
+      say(String(e));
+    } finally {
+      setPluginBusy(null);
+    }
+  };
+
+  /**
+   * Một nút lo đủ: với mọi CLI có trên máy, đăng ký MCP server rồi cài plugin skill.
+   * Bỏ qua phần đã có sẵn nên bấm lại nhiều lần vẫn an toàn.
+   */
+  const setupAll = async () => {
+    setSetupBusy(true);
+    const done: string[] = [];
+    const failed: string[] = [];
+    try {
+      for (const cli of ["claude", "codex"] as const) {
+        const m = mcp();
+        const pl = plugin();
+        const hasCli = cli === "claude" ? m?.claude_registered !== null : m?.codex_registered !== null;
+        if (!hasCli) continue;
+        try {
+          const reg = cli === "claude" ? m?.claude_registered : m?.codex_registered;
+          if (!reg) await api.mcpRegister(cli);
+          const ins = cli === "claude" ? pl?.claude_installed : pl?.codex_installed;
+          if (!ins) await api.pluginInstall(cli);
+          done.push(cli);
+        } catch (e) {
+          failed.push(`${cli}: ${String(e)}`);
+        }
+      }
+      setMcp(await api.mcpInfo().catch(() => null));
+      setPlugin(await api.pluginInfo().catch(() => null));
+      if (failed.length) say(`Lỗi khi cài — ${failed.join(" | ")}`);
+      else if (done.length) say(`Đã cài MCP + plugin cho ${done.join(", ")} — mở phiên CLI mới để dùng`);
+      else say("Không thấy Claude Code hay Codex trên PATH");
+    } finally {
+      setSetupBusy(false);
     }
   };
 
@@ -2305,6 +2367,20 @@ export default function App() {
                 Đang dùng: <b>{llm()?.active ?? "không có provider nào"}</b>
               </div>
 
+              <div class="settings-section">Agent ngoài — Claude Code / Codex</div>
+              <div class="settings-hint">
+                Một nút lo đủ cho mọi CLI có trên máy: <b>MCP server</b> (công cụ thao tác
+                vault) và <b>plugin skill</b> (dạy agent quy ước của vault). Bấm lại lúc nào
+                cũng được — phần đã có sẵn sẽ bỏ qua. Mở phiên CLI mới để nhận.
+              </div>
+              <button
+                class="settings-primary"
+                disabled={setupBusy() || mcpBusy() !== null || pluginBusy() !== null}
+                onClick={setupAll}
+              >
+                {setupBusy() ? "Đang cài…" : "Cài đặt tất cả"}
+              </button>
+
               <div class="settings-section">MCP server — cho agent ngoài thao tác vault</div>
               <div class="settings-hint">
                 Claude Code / Codex chạy ở bất kỳ thư mục nào cũng tìm, đọc, sửa, đổi tên (tự
@@ -2364,6 +2440,89 @@ export default function App() {
                             <div class="mcp-snippet-head">
                               <span>{snip.title}</span>
                               <button title="Copy" onClick={() => copyText(snip.text, "cấu hình MCP")}>
+                                <IconCopy />
+                              </button>
+                            </div>
+                            <pre>{snip.text}</pre>
+                          </div>
+                        )}
+                      </For>
+                    </Show>
+                  </>
+                )}
+              </Show>
+
+              <div class="settings-section">Plugin skill — dạy agent dùng vault cho đúng</div>
+              <div class="settings-hint">
+                Chỉ có tool thì agent vẫn đoán sai quy ước: path tương đối, wikilink theo tên
+                file, đổi tên phải dùng <code>rename_note</code> để không gãy link… Plugin
+                đóng gói phần đó thành skill và cài qua chính marketplace của từng CLI.
+              </div>
+              <Show
+                when={plugin()}
+                fallback={<div class="settings-active">Đang kiểm tra trạng thái cài…</div>}
+              >
+                {(p) => (
+                  <>
+                    <For
+                      each={[
+                        { cli: "claude" as const, label: "Claude Code CLI", ins: p().claude_installed },
+                        { cli: "codex" as const, label: "Codex CLI", ins: p().codex_installed },
+                      ]}
+                    >
+                      {(row) => (
+                        <div class="settings-option mcp-row" classList={{ disabled: row.ins === null }}>
+                          <span class="settings-label">{row.label}</span>
+                          <span
+                            class="settings-state"
+                            classList={{ ok: row.ins === true, missing: row.ins === null }}
+                          >
+                            {row.ins === null ? (
+                              <><IconClose /> không thấy trên PATH</>
+                            ) : row.ins ? (
+                              <><IconOk /> đã cài</>
+                            ) : (
+                              "chưa cài"
+                            )}
+                          </span>
+                          <button
+                            class="mcp-btn"
+                            disabled={row.ins === null || pluginBusy() !== null}
+                            onClick={() => pluginToggle(row.cli)}
+                          >
+                            {pluginBusy() === row.cli ? "…" : row.ins ? "Gỡ" : "Cài"}
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                    <div class="plugin-skills">
+                      <For each={p().skills}>
+                        {(sk) => (
+                          <div class="plugin-skill">
+                            <code>{sk.name}</code>
+                            <span>{sk.description}</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                    <button
+                      class="mcp-manual-toggle"
+                      onClick={() => setPluginShowManual(!pluginShowManual())}
+                    >
+                      {pluginShowManual() ? "Ẩn" : "Hiện"} lệnh cài tay
+                    </button>
+                    <Show when={pluginShowManual()}>
+                      <For
+                        each={[
+                          { title: "Claude Code", text: p().claude_cmds.join("\n") },
+                          { title: "Codex", text: p().codex_cmds.join("\n") },
+                        ]}
+                      >
+                        {(snip) => (
+                          <div class="mcp-snippet">
+                            <div class="mcp-snippet-head">
+                              <span>{snip.title}</span>
+                              <button title="Copy" onClick={() => copyText(snip.text, "lệnh cài plugin")}>
                                 <IconCopy />
                               </button>
                             </div>

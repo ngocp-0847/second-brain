@@ -1,0 +1,19 @@
+{
+  "name": "second-brain-app",
+  "interface": {
+    "displayName": "Second Brain"
+  },
+  "plugins": [
+    {
+      "name": "second-brain",
+      "source": {
+        "source": "local",
+        "path": "./plugins/second-brain"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
