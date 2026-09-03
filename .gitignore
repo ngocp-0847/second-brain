@@ -6,3 +6,6 @@ src-tauri/gen/
 
 # dữ liệu app sinh ra trong vault (không bao giờ thuộc repo)
 .brain/
+
+# worktree tạm của Claude Code
+.claude/worktrees/
