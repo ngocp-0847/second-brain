@@ -115,6 +115,8 @@ export interface RevisionMeta {
   id: number;
   ts: number;
   chars: number;
+  /** Ai ghi ra bản này: null = bạn / tool ngoài, "claude" = Claude Code (qua hook). */
+  source: string | null;
 }
 
 export interface GraphData {
