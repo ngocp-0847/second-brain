@@ -35,16 +35,15 @@ struct TermExit {
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Mở PTY chạy shell (PowerShell trên Windows) trong `cwd`; `run_claude` thì gõ sẵn
-/// lệnh `claude` để vào thẳng phiên agent — thoát claude vẫn còn shell để dùng tiếp.
+/// Mở PTY chạy shell (PowerShell trên Windows) trong `cwd`; `startup` là lệnh gõ sẵn
+/// (vd. `claude --settings …`) để vào thẳng phiên agent — thoát claude vẫn còn shell.
 pub fn open(
     app: AppHandle,
     state: &TermState,
     cwd: Option<std::path::PathBuf>,
     cols: u16,
     rows: u16,
-    run_claude: bool,
-    mcp_config: Option<std::path::PathBuf>,
+    startup: Option<String>,
 ) -> anyhow::Result<u32> {
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
@@ -68,13 +67,8 @@ pub fn open(
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
     // ConPTY buffer input nên gõ sớm trước khi shell sẵn sàng vẫn được nhận.
-    if run_claude {
-        // `--mcp-config` cắm MCP server của vault vào phiên claude này (không cần đăng ký tay).
-        let line = match &mcp_config {
-            Some(p) => format!("claude --mcp-config \"{}\"\r", p.to_string_lossy()),
-            None => "claude\r".to_string(),
-        };
-        let _ = writer.write_all(line.as_bytes());
+    if let Some(cmd) = startup {
+        let _ = writer.write_all(format!("{cmd}\r").as_bytes());
     }
 
     let app2 = app.clone();

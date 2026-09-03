@@ -2996,6 +2996,7 @@ dependencies = [
  "base64 0.22.1",
  "janitor",
  "mcp",
+ "notify-debouncer-mini",
  "portable-pty",
  "qa",
  "rusqlite",

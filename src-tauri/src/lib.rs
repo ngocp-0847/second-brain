@@ -6,20 +6,36 @@ mod git;
 mod history;
 pub mod mcp_setup;
 mod terminal;
+mod watch;
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, State};
 use vault_core::Vault;
 
+pub use watch::hook_sink;
+
 #[derive(Default)]
-struct AppState {
-    vault: Mutex<Option<Vault>>,
+pub(crate) struct AppState {
+    pub(crate) vault: Mutex<Option<Vault>>,
     /// "auto" | "claude" | "codex"
     llm_pref: Mutex<String>,
     /// Revision history (.brain/history.db) — best-effort, lỗi không chặn thao tác note.
-    history: Mutex<Option<history::History>>,
+    pub(crate) history: Mutex<Option<history::History>>,
+    /// Path (tương đối, `/`) app vừa tự ghi + lúc ghi — watcher dùng để bỏ qua echo.
+    pub(crate) recent_writes: Mutex<HashMap<String, Instant>>,
+    /// Watcher của vault đang mở; thay vault → drop cái cũ.
+    watcher: Mutex<Option<watch::Handle>>,
+}
+
+/// Ghi nhớ "app vừa ghi path này" trước khi chạm đĩa, để event watcher sinh ra không
+/// bị coi là thay đổi từ bên ngoài (UI sẽ không reload nội dung mình vừa gõ).
+fn mark_self_write(state: &State<AppState>, path: &str) {
+    if let Ok(mut g) = state.recent_writes.lock() {
+        g.insert(path.replace('\\', "/"), Instant::now());
+    }
 }
 
 /// Chạy thao tác history best-effort: chưa mở vault / lỗi DB → bỏ qua trong im lặng.
@@ -108,7 +124,7 @@ fn vault_info(vault: &mut Vault, index_ms: u128) -> anyhow::Result<VaultInfo> {
 }
 
 #[tauri::command]
-fn open_vault(path: String, state: State<AppState>) -> CmdResult<VaultInfo> {
+fn open_vault(path: String, app: AppHandle, state: State<AppState>) -> CmdResult<VaultInfo> {
     // Không có guard này thì Db::open sẽ create_dir_all và âm thầm dựng lại một
     // vault rỗng khi path đã biến mất (folder bị xoá, ổ rời rút ra, drive unmount).
     if !std::path::Path::new(&path).is_dir() {
@@ -117,8 +133,14 @@ fn open_vault(path: String, state: State<AppState>) -> CmdResult<VaultInfo> {
     let mut vault = Vault::open(&path).map_err(err)?;
     let stats = vault.index().map_err(err)?;
     let info = vault_info(&mut vault, stats.duration_ms).map_err(err)?;
-    *state.history.lock().map_err(err)? = history::History::open(&vault.root.join(".brain")).ok();
+    let root = vault.root.clone();
+    *state.history.lock().map_err(err)? = history::History::open(&root.join(".brain")).ok();
     *state.vault.lock().map_err(err)? = Some(vault);
+    // Dừng watcher vault cũ (drop) rồi mới watch vault mới. Watcher lỗi (ổ mạng,
+    // hết inotify handle…) không chặn mở vault — chỉ mất tính năng tự reload.
+    let mut w = state.watcher.lock().map_err(err)?;
+    *w = None;
+    *w = watch::start(app, root).ok();
     Ok(info)
 }
 
@@ -138,7 +160,7 @@ fn read_note(path: String, state: State<AppState>) -> CmdResult<String> {
     })?;
     // Nội dung trên đĩa khác bản app biết (agent AI / tool ngoài vừa sửa)
     // → bản cũ vào revision ngay (force).
-    with_history(&state, |h| h.track(&path, &content, true));
+    with_history(&state, |h| h.track(&path, &content, true, None));
     Ok(content)
 }
 
@@ -153,6 +175,7 @@ fn write_note(
     with_info: Option<bool>,
     state: State<AppState>,
 ) -> CmdResult<Option<VaultInfo>> {
+    mark_self_write(&state, &path);
     let info = with_vault(&state, |v| {
         let abs = v.abs_path(&path)?;
         if let Some(dir) = abs.parent() {
@@ -167,7 +190,7 @@ fn write_note(
         }
     })?;
     // Bản trước save vào revision theo interval gộp 2 phút (kiểu Obsidian).
-    with_history(&state, |h| h.track(&path, &content, false));
+    with_history(&state, |h| h.track(&path, &content, false, None));
     Ok(info)
 }
 
@@ -289,7 +312,7 @@ fn trash_note(path: String, state: State<AppState>) -> CmdResult<()> {
         Ok(std::fs::read_to_string(abs).unwrap_or_default())
     });
     if let Ok(c) = content {
-        with_history(&state, |h| h.track(&path, &c, true));
+        with_history(&state, |h| h.track(&path, &c, true, None));
     }
     with_vault(&state, |v| v.trash_note(&path))
 }
@@ -628,10 +651,20 @@ fn term_open(
     term: State<terminal::TermState>,
 ) -> CmdResult<u32> {
     let cwd = state.vault.lock().ok().and_then(|g| g.as_ref().map(|v| v.root.clone()));
-    let run_claude = qa::provider_available(qa::Provider::ClaudeCli);
-    // Terminal trong app vào thẳng claude đã cắm MCP server của vault — không cần đăng ký tay.
-    let mcp_cfg = cwd.as_deref().and_then(|r| mcp_setup::write_config(r).ok());
-    terminal::open(app, &term, cwd, cols, rows, run_claude, mcp_cfg).map_err(err)
+    // Có claude → gõ sẵn lệnh vào phiên: hook để app biết Claude sửa note nào, kèm
+    // `--mcp-config` cắm MCP server của vault (không cần đăng ký tay).
+    let startup = qa::provider_available(qa::Provider::ClaudeCli).then(|| {
+        let mut line = watch::claude_command(cwd.as_deref());
+        if let Some(cfg) = cwd.as_deref().and_then(|r| mcp_setup::write_config(r).ok()) {
+            // Dấu `/` để chuỗi chạy được dù shell nào thực thi, giống watch::claude_command.
+            line.push_str(&format!(
+                " --mcp-config \"{}\"",
+                cfg.to_string_lossy().replace('\\', "/")
+            ));
+        }
+        line
+    });
+    terminal::open(app, &term, cwd, cols, rows, startup).map_err(err)
 }
 
 #[tauri::command]

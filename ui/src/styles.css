@@ -2180,6 +2180,16 @@ details[open] > .tree-dir .tree-dir-arrow {
   font-size: 11.5px;
 }
 
+.history-src {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
 .history-preview {
   display: flex;
   flex-direction: column;
@@ -2477,14 +2487,45 @@ details[open] > .tree-dir .tree-dir-arrow {
   background: var(--accent-bg-hover);
 }
 
-/* ---- terminal panel (đáy khu vực chính) ---- */
+/* ---- terminal panel (đáy khu vực chính, kiểu VS Code) ---- */
 .term-panel {
+  position: relative;
   flex-shrink: 0;
+  /* chiều cao do JS đặt (kéo thanh resize / maximize), đây chỉ là fallback */
   height: 300px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
   background: var(--bg-ribbon);
+}
+
+/* Thanh kéo đổi chiều cao — nằm đè lên viền trên, vùng bắt 6px để dễ chộp. */
+.term-resizer {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 3;
+}
+
+.term-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 2px 0;
+  background: transparent;
+  transition: background 120ms;
+}
+
+.term-resizer:hover::after,
+.term-panel.resizing .term-resizer::after {
+  background: var(--accent);
+}
+
+.term-panel.resizing {
+  user-select: none;
 }
 
 .term-head {
@@ -2493,9 +2534,13 @@ details[open] > .tree-dir .tree-dir-arrow {
   gap: var(--sp-sm);
   padding: 3px var(--sp-md);
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .term-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 600;
   color: var(--fg-soft);
@@ -2505,16 +2550,45 @@ details[open] > .tree-dir .tree-dir-arrow {
   flex: 1;
   font-size: 11px;
   color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
+/* Không padding ở host: FitAddon đo host rồi trừ padding của .xterm, nên
+ * padding phải nằm trên .xterm — đặt ở host thì xterm tràn/thiếu vài hàng. */
 .term-host {
   flex: 1;
   min-height: 0;
-  padding: var(--sp-xs) var(--sp-sm);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .term-host .xterm {
   height: 100%;
+  padding: 4px 6px 4px 10px;
+}
+
+/* Thanh cuộn của xterm — mảnh, hợp theme, luôn hiện để biết còn scrollback. */
+.term-host .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.term-host .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+.term-host .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.term-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-faint);
+  background-clip: padding-box;
 }
 
 /* ---- vùng chọn → AI: nút nổi + popover prompt ---- */
