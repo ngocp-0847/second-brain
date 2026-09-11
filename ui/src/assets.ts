@@ -51,3 +51,29 @@ export const resolveImageSrc = (src: string): Promise<string> => {
   }
   return loadImage(rel);
 };
+
+// ---- đưa ảnh từ clipboard / drop vào vault ----
+
+/** File ảnh trong một clipboard/drop (bỏ qua file không phải ảnh). */
+export const imageFilesOf = (dt: DataTransfer | null | undefined): File[] =>
+  dt?.files?.length ? Array.from(dt.files).filter((f) => f.type.startsWith("image/")) : [];
+
+/**
+ * Lưu một File ảnh vào `assets/` của vault, trả path tương đối.
+ *
+ * Screenshot dán từ clipboard luôn tên `image.png` — đặt lại theo dấu thời gian
+ * kiểu Obsidian để nhiều ảnh trong cùng note không đụng tên nhau.
+ */
+export const saveImageFile = async (f: File): Promise<string> => {
+  const buf = new Uint8Array(await f.arrayBuffer());
+  // btoa cần chuỗi; String.fromCharCode(...cả mảng) làm tràn stack với ảnh lớn
+  // nên phải cắt khúc.
+  let bin = "";
+  for (let i = 0; i < buf.length; i += 0x8000) {
+    bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  }
+  const ext = (f.type.split("/")[1] ?? "png").replace("jpeg", "jpg").replace("svg+xml", "svg");
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const name = f.name && !/^image\.\w+$/i.test(f.name) ? f.name : `Pasted image ${stamp}.${ext}`;
+  return api.saveAsset(name, btoa(bin));
+};

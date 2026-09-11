@@ -7,7 +7,7 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { api, type NoteMeta } from "./api";
-import { IMG_EXTS, isImagePath, loadImage } from "./assets";
+import { IMG_EXTS, isImagePath, loadImage, saveImageFile } from "./assets";
 // `dragging` của module dnd đổi tên: canvas đã có biến `dragging` riêng cho
 // việc kéo node trên bảng.
 import { dragging as draggingFile, setCanvasDropHandler } from "./dnd";
@@ -719,18 +719,7 @@ export function CanvasView(props: {
       if (!f.type.startsWith("image/")) continue;
       e.preventDefault();
       try {
-        const buf = new Uint8Array(await f.arrayBuffer());
-        let bin = "";
-        for (let i = 0; i < buf.length; i += 0x8000) {
-          bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-        }
-        const ext = (f.type.split("/")[1] ?? "png")
-          .replace("jpeg", "jpg")
-          .replace("svg+xml", "svg");
-        const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-        const name =
-          f.name && !/^image\.\w+$/i.test(f.name) ? f.name : `Pasted image ${stamp}.${ext}`;
-        await addImageNode(await api.saveAsset(name, btoa(bin)));
+        await addImageNode(await saveImageFile(f));
       } catch (err) {
         console.error("paste ảnh thất bại:", err);
       }

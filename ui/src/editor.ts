@@ -35,7 +35,7 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import type { NoteMeta } from "./api";
-import { isImagePath, resolveImageSrc } from "./assets";
+import { imageFilesOf, isImagePath, resolveImageSrc, saveImageFile } from "./assets";
 
 /** Vùng chọn hiện tại + toạ độ màn hình để neo toolbar nổi ("Sửa bằng AI"). */
 export interface SelectionInfo {
@@ -453,6 +453,36 @@ class ImageWidget extends WidgetType {
   /** Cho mousedown đi qua để bấm vào ảnh là đặt được con trỏ vào dòng mà sửa. */
   ignoreEvent(e: Event) {
     return e.type !== "mousedown";
+  }
+}
+
+// ---- dán ảnh từ clipboard ----
+// Clipboard chứa file ảnh (screenshot, "copy image" trên web, copy file trong
+// Explorer) thì text/plain thường rỗng — CodeMirror dán xong chẳng có gì, nhìn
+// như app hỏng. Lưu file vào assets/ rồi chèn `![[...]]` để live preview render.
+async function insertPastedImages(view: EditorView, files: File[]) {
+  for (const f of files) {
+    let rel: string;
+    try {
+      rel = await saveImageFile(f);
+    } catch (err) {
+      console.error("lưu ảnh dán vào vault thất bại:", err);
+      continue;
+    }
+    const { from, to } = view.state.selection.main;
+    // Ảnh chỉ thành widget khi ĐỨNG MỘT MÌNH trên dòng, và dòng đó không chứa
+    // con trỏ (blockPreview giữ text thô ở dòng đang sửa). Nên: xuống dòng nếu
+    // trước con trỏ đã có chữ, và kết thúc bằng \n để con trỏ nằm ở dòng sau.
+    const lead = view.state.sliceDoc(view.state.doc.lineAt(from).from, from).trim()
+      ? "\n"
+      : "";
+    const insert = `${lead}![[${rel}]]\n`;
+    view.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: from + insert.length },
+      scrollIntoView: true,
+      userEvent: "input.paste",
+    });
   }
 }
 
@@ -895,9 +925,17 @@ export function createEditor(opts: EditorOpts): EditorHandle {
             opts.onSelection(readSelection(u.view));
         }),
         EditorView.domEventHandlers({
-          // Dán block mermaid xong, con trỏ nằm trong block nên nó hiện code thô.
-          // Đưa con trỏ ra ngay sau block để diagram render luôn.
-          paste(_e, view) {
+          // Ảnh trong clipboard → lưu vào vault rồi chèn `![[...]]`.
+          // Còn lại là dán thường: dán block mermaid xong con trỏ nằm trong
+          // block nên nó hiện code thô — đưa con trỏ ra ngay sau block để
+          // diagram render luôn.
+          paste(e, view) {
+            const imgs = imageFilesOf(e.clipboardData);
+            if (imgs.length) {
+              e.preventDefault();
+              void insertPastedImages(view, imgs);
+              return true;
+            }
             queueMicrotask(() => {
               const blk = mermaidBlockAt(view.state, view.state.selection.main.head);
               if (!blk) return; // con trỏ đã ở ngoài block
