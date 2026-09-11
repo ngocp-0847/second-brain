@@ -84,7 +84,8 @@ export const api = {
   setLlmPref: (pref: string) => invoke<void>("set_llm_pref", { pref }),
   janitorRun: () => invoke<JanitorReport>("janitor_run"),
   janitorLatest: () => invoke<JanitorReport | null>("janitor_latest"),
-  janitorApply: (actionId: number) => invoke<string>("janitor_apply", { actionId }),
+  janitorApply: (actionId: number) =>
+    invoke<JanitorApplied>("janitor_apply", { actionId }),
   janitorDismiss: (actionId: number) => invoke<void>("janitor_dismiss", { actionId }),
   graphData: () => invoke<GraphData>("graph_data"),
   listCanvases: () => invoke<string[]>("list_canvases"),
@@ -180,6 +181,15 @@ export interface JanitorAction {
   severity: string;
   description: string;
   status: string;
+}
+
+/** Kết quả áp dụng một đề xuất janitor. */
+export interface JanitorApplied {
+  message: string;
+  /** Note bị đụng tới (đổi tên / vào thùng rác), null = action không gắn note nào. */
+  from: string | null;
+  /** Path mới; null = note đã vào thùng rác. */
+  to: string | null;
 }
 
 export interface JanitorReport {

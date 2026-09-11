@@ -244,6 +244,7 @@ flowchart LR
 | Duplicate/near-duplicate (MinHash trên nội dung) | `suggest`: merge |
 | Frontmatter thiếu/sai schema (định nghĩa trong `config.toml`) | `auto`: bổ sung field mặc định |
 | Naming convention (regex per-folder) | `propose`: rename |
+| Note còn tên mặc định (`Untitled`, `Untitled 2`) | `propose`: đặt tên theo dòng có nghĩa đầu tiên của nội dung, sửa luôn H1 placeholder |
 | Attachment mồ côi | `propose`: chuyển vào trash |
 | Tag gần trùng (`#Work` vs `#work`) | `propose`: hợp nhất |
 | Note quá lớn (> ngưỡng) | `suggest`: tách theo heading |

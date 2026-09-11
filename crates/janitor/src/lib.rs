@@ -6,6 +6,7 @@
 //! chỉ chuyển vào .brain/trash.
 
 pub mod restructure;
+mod title;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,8 @@ pub enum Apply {
     TrashNote { path: String },
     /// Ghi/cập nhật MOC; phần user viết trên marker được giữ nguyên.
     WriteMoc { path: String, content: String },
+    /// Đặt tên cho note còn tên mặc định: sửa H1 placeholder rồi đổi tên file.
+    RetitleNote { path: String, title: String },
     /// Chỉ thông tin, không có hành động.
     None,
 }
@@ -43,6 +46,17 @@ pub struct ActionRow {
     pub status: String, // applied | pending | dismissed | info
     #[serde(skip)]
     pub payload: Apply,
+}
+
+/// Kết quả áp dụng một action. Có `from`/`to` để UI đang mở note đó đi theo
+/// thay vì ôm một path đã chết.
+#[derive(Debug, Clone, Serialize)]
+pub struct Applied {
+    pub message: String,
+    /// Note bị action đụng tới (đổi tên / vào thùng rác).
+    pub from: Option<String>,
+    /// Path mới; None = không còn ở đâu nữa (đã vào .brain/trash).
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +273,9 @@ fn lint(vault: &Vault, now: i64) -> Result<Vec<Finding>> {
         }
     }
 
+    // 6. Note còn tên mặc định (Untitled…) → đề xuất tên lấy từ nội dung.
+    out.extend(title::propose_titles(vault)?);
+
     Ok(out)
 }
 
@@ -297,7 +314,7 @@ pub fn run(vault: &mut Vault) -> Result<Report> {
 
         if severity == "auto" {
             match execute(vault, &f.payload) {
-                Ok(msg) => description = format!("{description} — {msg}"),
+                Ok(a) => description = format!("{description} — {}", a.message),
                 Err(e) => {
                     status = "pending";
                     description = format!("{description} — auto thất bại ({e}), chờ duyệt");
@@ -339,15 +356,19 @@ pub fn run(vault: &mut Vault) -> Result<Report> {
     Ok(Report { run_id, ts: now, snapshotted, applied, proposals, suggestions })
 }
 
-fn execute(vault: &mut Vault, apply: &Apply) -> Result<String> {
+fn execute(vault: &mut Vault, apply: &Apply) -> Result<Applied> {
     match apply {
         Apply::FixLink { bad_target, new_target } => {
             let n = vault.fix_link_target(bad_target, new_target)?;
-            Ok(format!("đã sửa {n} link"))
+            Ok(Applied { message: format!("đã sửa {n} link"), from: None, to: None })
         }
         Apply::TrashNote { path } => {
             vault.trash_note(path)?;
-            Ok("đã chuyển vào .brain/trash".into())
+            Ok(Applied {
+                message: "đã chuyển vào .brain/trash".into(),
+                from: Some(path.clone()),
+                to: None,
+            })
         }
         Apply::WriteMoc { path, content } => {
             let abs = vault.abs_path(path)?;
@@ -365,10 +386,46 @@ fn execute(vault: &mut Vault, apply: &Apply) -> Result<String> {
             };
             std::fs::write(&abs, merged)?;
             vault.index()?;
-            Ok("đã ghi MOC".into())
+            Ok(Applied { message: "đã ghi MOC".into(), from: None, to: Some(path.clone()) })
         }
-        Apply::None => Ok("không có hành động".into()),
+        Apply::RetitleNote { path, title } => {
+            let new_rel = title::unique_path(vault, path, title)?;
+            // Sửa luôn H1 `# Untitled 2` trong nội dung — đổi mỗi tên file thì
+            // mở note ra vẫn thấy cái tiêu đề cũ chình ình.
+            let abs = vault.abs_path(path)?;
+            if let Ok(body) = std::fs::read_to_string(&abs) {
+                if let Some(fixed) = retitle_h1(&body, title) {
+                    std::fs::write(&abs, fixed)?;
+                }
+            }
+            let n = vault.rename_note(path, &new_rel)?;
+            Ok(Applied {
+                message: format!("đã đặt tên → {new_rel} (rewrite {n} link)"),
+                from: Some(path.clone()),
+                to: Some(new_rel),
+            })
+        }
+        Apply::None => Ok(Applied { message: "không có hành động".into(), from: None, to: None }),
     }
+}
+
+/// Thay dòng `# Untitled …` đầu tiên bằng tiêu đề mới. None = note không có
+/// H1 placeholder nào để sửa (giữ nguyên nội dung).
+fn retitle_h1(body: &str, title: &str) -> Option<String> {
+    let mut lines: Vec<String> = body.lines().map(str::to_string).collect();
+    // Chỉ xét khối chữ đầu tiên: H1 nằm sau cả đoạn nội dung thì không phải
+    // tiêu đề của note nữa.
+    let idx = lines.iter().position(|l| !l.trim().is_empty())?;
+    let head = lines[idx].trim().strip_prefix("# ")?.to_string();
+    if !title::is_placeholder(&head) {
+        return None;
+    }
+    lines[idx] = format!("# {title}");
+    let mut out = lines.join("\n");
+    if body.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Tầng 2 (LLM): chạy SAU `run`, chèn proposals vào lần chạy gần nhất.
@@ -406,8 +463,14 @@ pub fn append_tier2(vault: &mut Vault, provider: qa::Provider) -> Result<Vec<Act
     Ok(rows)
 }
 
-/// Duyệt một đề xuất đang pending.
+/// Duyệt một đề xuất đang pending. Chỉ trả về câu thông báo —
+/// dùng `apply_action_detailed` khi cần biết note đã đi đâu.
 pub fn apply_action(vault: &mut Vault, action_id: i64) -> Result<String> {
+    Ok(apply_action_detailed(vault, action_id)?.message)
+}
+
+/// Như `apply_action` nhưng kèm path trước/sau để giao diện cập nhật tab đang mở.
+pub fn apply_action_detailed(vault: &mut Vault, action_id: i64) -> Result<Applied> {
     let (payload, status): (String, String) = vault.db.conn.query_row(
         "SELECT payload, status FROM janitor_action WHERE id = ?1",
         [action_id],
@@ -418,12 +481,12 @@ pub fn apply_action(vault: &mut Vault, action_id: i64) -> Result<String> {
     }
     let apply: Apply = serde_json::from_str(&payload)?;
     let _ = snapshot(&vault.root, &format!("trước khi áp dụng action {action_id}"));
-    let msg = execute(vault, &apply)?;
+    let applied = execute(vault, &apply)?;
     vault.db.conn.execute(
         "UPDATE janitor_action SET status = 'applied' WHERE id = ?1",
         [action_id],
     )?;
-    Ok(msg)
+    Ok(applied)
 }
 
 pub fn dismiss_action(vault: &Vault, action_id: i64) -> Result<()> {
@@ -536,6 +599,45 @@ mod tests {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn untitled_note_gets_title_from_content() {
+        let tmp = std::env::temp_dir().join(format!("brain-jan-title-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Note tạo bằng nút "Note mới": H1 placeholder, nội dung dán bên dưới.
+        write(&tmp, "Untitled 2.md", "# Untitled 2\n\nCách ăn agreement của FPaaS ra sao.\n");
+        // Có người link tới bằng tên cũ — rename phải rewrite link này.
+        write(&tmp, "ref.md", "Xem [[Untitled 2]] nhé, dài đủ để không thành stub.\n");
+
+        let mut v = Vault::open(&tmp).unwrap();
+        let report = run(&mut v).unwrap();
+
+        let prop = report
+            .proposals
+            .iter()
+            .find(|p| p.rule == "untitled-note")
+            .expect("phải có proposal untitled-note");
+        apply_action(&mut v, prop.id).unwrap();
+
+        let renamed = tmp.join("Cách ăn agreement của FPaaS ra sao..md");
+        assert!(!renamed.exists(), "tên file không được kết thúc bằng dấu chấm");
+        let new_path = tmp.join("Cách ăn agreement của FPaaS ra sao.md");
+        assert!(new_path.exists(), "note phải được đổi tên theo nội dung");
+        assert!(!tmp.join("Untitled 2.md").exists());
+
+        // H1 placeholder trong nội dung cũng phải đổi theo.
+        let body = std::fs::read_to_string(&new_path).unwrap();
+        assert!(body.starts_with("# Cách ăn agreement của FPaaS ra sao"), "got: {body}");
+
+        // Wikilink trỏ tới tên cũ được rewrite.
+        let r = std::fs::read_to_string(tmp.join("ref.md")).unwrap();
+        assert!(r.contains("[[Cách ăn agreement của FPaaS ra sao]]"), "got: {r}");
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
