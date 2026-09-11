@@ -348,6 +348,29 @@ details[open] > .tree-dir .tree-dir-arrow {
   outline: none;
 }
 
+/* Tab xem ảnh: ảnh nằm giữa, không phóng quá khung nhìn. */
+.image-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: var(--sp-lg);
+  background: var(--bg);
+}
+
+.image-view img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-md);
+}
+
+.image-view-msg {
+  color: var(--fg-faint);
+}
+
 .tree-empty {
   padding: var(--sp-md);
   color: var(--fg-faint);

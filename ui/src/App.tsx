@@ -78,11 +78,13 @@ import {
   IconUnbookmark,
   IconVault,
   IconVaultSwitch,
+  IconImage,
 } from "./icons";
 import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { TermPanel } from "./terminal";
 import { DragGhost, setDirDropHandler } from "./dnd";
 import { parentDir, Tree, type TreeEditing, type TreeFile } from "./tree";
+import { isImagePath, resolveImageSrc } from "./assets";
 import {
   forgetVault,
   getBookmarks,
@@ -97,7 +99,7 @@ import {
 } from "./session";
 import { isDark, setThemePref, theme, themePref, toggleTheme, type ThemePref } from "./theme";
 
-type View = "editor" | "graph" | "canvas";
+type View = "editor" | "graph" | "canvas" | "image";
 
 /** `?note=` do `open_note_window` gắn vào URL: cửa sổ này chỉ để xem đúng một
  *  note, nên bỏ qua khôi phục phiên VÀ không được ghi đè workspace đã lưu. */
@@ -131,7 +133,7 @@ const fmtAgo = (epochSec: number) => {
 
 /** Một chặng trong lịch sử điều hướng của tab (đủ để dựng lại nội dung tab). */
 interface Loc {
-  kind: "empty" | "note" | "graph" | "canvas";
+  kind: "empty" | "note" | "graph" | "canvas" | "image";
   path: string | null;
 }
 
@@ -141,14 +143,36 @@ const HIST_MAX = 50;
 /** Một tab của khu vực chính: note, graph, canvas hoặc trống ("New tab"). */
 interface TabState {
   id: number;
-  kind: "empty" | "note" | "graph" | "canvas";
-  /** note: path .md · canvas: path .canvas · graph: giữ path cũ để toggle quay lại. */
+  kind: "empty" | "note" | "graph" | "canvas" | "image";
+  /** note: path .md · canvas: path .canvas · image: path ảnh · graph: giữ path cũ để toggle quay lại. */
   path: string | null;
   /** Tab ghim: không bị "đóng các tab khác"/"đóng tất cả" cuốn theo. */
   pinned?: boolean;
   /** Lịch sử của RIÊNG tab này, kiểu trình duyệt. `hi` là vị trí hiện tại. */
   hist: Loc[];
   hi: number;
+}
+
+/** Tab xem ảnh: file trong vault không load thẳng vào WebView được nên phải
+ *  đi qua backend (data-url). Chỉ để xem — sửa thì "Mở bằng app mặc định". */
+function ImageView(props: { path: string }) {
+  const [src, setSrc] = createSignal<string | null>(null);
+  const [err, setErr] = createSignal<string | null>(null);
+  createEffect(() => {
+    const p = props.path;
+    setSrc(null);
+    setErr(null);
+    resolveImageSrc(p)
+      .then(setSrc)
+      .catch((e) => setErr(`Không đọc được ảnh: ${e}`));
+  });
+  return (
+    <div class="image-view">
+      <Show when={src()} fallback={<div class="image-view-msg">{err() ?? "Đang mở ảnh…"}</div>}>
+        <img src={src()!} alt={props.path} />
+      </Show>
+    </div>
+  );
 }
 
 export default function App() {
@@ -180,6 +204,9 @@ export default function App() {
   const [view, setView] = createSignal<View>("editor");
   const [canvasPath, setCanvasPath] = createSignal<string | null>(null);
   const [canvases, setCanvases] = createSignal<string[]>([]);
+  // Ảnh: cũng không nằm trong index note, nạp riêng như canvas để hiện trong cây.
+  const [assets, setAssets] = createSignal<string[]>([]);
+  const [imagePath, setImagePath] = createSignal<string | null>(null);
 
   // Tabs: mở nhiều note/graph/canvas song song, mỗi tab một trạng thái riêng.
   const [tabs, setTabs] = createSignal<TabState[]>([
@@ -348,7 +375,19 @@ export default function App() {
     setStats(info.stats);
   };
 
+  /** Canvas + ảnh không nằm trong index note nên phải nạp riêng — gọi lại sau
+   *  mọi thao tác đụng tới file (mở vault, dán ảnh, đổi tên, xóa…). */
+  const reloadFiles = async () => {
+    const [cs, as] = await Promise.all([
+      api.listCanvases().catch(() => []),
+      api.listAssets().catch(() => []),
+    ]);
+    setCanvases(cs);
+    setAssets(as);
+  };
+
   const openVaultAt = async (path: string) => {
+
     setVaultOpen(false);
     // Bật trước setRoot: nếu không, effect ghi workspace sẽ chạy ngay khi root()
     // đổi — với tab của vault CŨ — và đè mất bản đã lưu của vault mới.
@@ -358,7 +397,7 @@ export default function App() {
       applyInfo(info);
       await pushRecentVault(info.root);
       setBookmarks(getBookmarks(info.root));
-      setCanvases(await api.listCanvases().catch(() => []));
+      await reloadFiles();
       if (SOLO_NOTE) {
         // Cửa sổ rời: chỉ mở đúng file được yêu cầu, không đụng tới bộ tab
         // đã lưu của cửa sổ chính.
@@ -451,12 +490,14 @@ export default function App() {
       // Note/canvas có thể đã bị xoá ngoài app từ lần trước → bỏ tab mồ côi.
       const notePaths = new Set(notes().map((n) => n.path));
       const canvasPaths = new Set(canvases());
+      const imagePaths = new Set(assets());
       const alive = ws.tabs.filter(
         (t) =>
           t.kind === "empty" ||
           t.kind === "graph" ||
           (t.kind === "note" && t.path && notePaths.has(t.path)) ||
-          (t.kind === "canvas" && t.path && canvasPaths.has(t.path)),
+          (t.kind === "canvas" && t.path && canvasPaths.has(t.path)) ||
+          (t.kind === "image" && t.path && imagePaths.has(t.path)),
       );
       if (!alive.length) {
         resetWorkspace();
@@ -525,7 +566,18 @@ export default function App() {
     pushHist({ kind: "canvas", path });
   };
 
-  /** Đồng bộ khu vực chính (editor/graph/canvas) theo nội dung một tab. */
+  /** Ảnh mở trong một tab riêng, chỉ để xem — sửa thì dùng app ngoài. */
+  const openImage = (path: string) => {
+    if (currentPath) editor.flush();
+    currentPath = null;
+    setCurrent(null);
+    setImagePath(path);
+    setView("image");
+    updateTab(activeId(), { kind: "image", path });
+    pushHist({ kind: "image", path });
+  };
+
+  /** Đồng bộ khu vực chính (editor/graph/canvas/ảnh) theo nội dung một tab. */
   const applyTab = async (t: TabState) => {
     currentPath = null;
     if (t.kind === "note" && t.path) {
@@ -546,6 +598,9 @@ export default function App() {
     if (t.kind === "canvas" && t.path) {
       setCanvasPath(t.path);
       setView("canvas");
+    } else if (t.kind === "image" && t.path) {
+      setImagePath(t.path);
+      setView("image");
     } else if (t.kind === "graph") {
       setView("graph");
     } else {
@@ -692,7 +747,11 @@ export default function App() {
 
   /** Icon đứng trước nhãn tab, phân biệt loại view. */
   const TabIcon = (p: { kind: TabState["kind"] }) => (
-    <Show when={p.kind === "graph"} fallback={<Show when={p.kind === "canvas"}><IconCanvas /></Show>}>
+    <Show when={p.kind === "graph"} fallback={
+      <Show when={p.kind === "canvas"} fallback={<Show when={p.kind === "image"}><IconImage /></Show>}>
+        <IconCanvas />
+      </Show>
+    }>
       <IconGraph />
     </Show>
   );
@@ -734,7 +793,7 @@ export default function App() {
     const path = `${untitledName(taken)}.canvas`;
     try {
       await api.writeNote(path, JSON.stringify({ nodes: [], edges: [] }));
-      setCanvases(await api.listCanvases().catch(() => []));
+      await reloadFiles();
       openCanvas(path);
     } catch (e) {
       say(String(e));
@@ -864,14 +923,15 @@ export default function App() {
     if (!clean || clean === base) return;
     const dir = ed.path.includes("/") ? ed.path.slice(0, ed.path.lastIndexOf("/") + 1) : "";
     try {
-      if (ed.kind === "note" && isCanvas(ed.path)) {
-        // Canvas nằm chung cây với note nên cũng đổi tên inline, nhưng phải đi
-        // qua rename_file: rename_note ép đuôi .md và tra bảng `note`.
+      if (ed.kind === "note" && isPlainFile(ed.path)) {
+        // Canvas và ảnh nằm chung cây với note nên cũng đổi tên inline, nhưng
+        // phải đi qua rename_file: rename_note ép đuôi .md và tra bảng `note`.
         const to = await api.renameFile(ed.path, `${dir}${clean}`);
-        setCanvases(await api.listCanvases().catch(() => []));
+        await reloadFiles();
         retargetTabs(ed.path, to);
         void retargetBookmark(ed.path, to);
         if (canvasPath() === ed.path) openCanvas(to);
+        if (imagePath() === ed.path) openImage(to);
       } else if (ed.kind === "note") {
         const to = `${dir}${clean}.md`;
         editor.flush();
@@ -947,10 +1007,14 @@ export default function App() {
           await api.trashNote(path);
           retargetTabs(path, null);
           void dropBookmark(path);
-          if (isCanvas(path)) {
-            setCanvases(await api.listCanvases().catch(() => []));
+          if (isPlainFile(path)) {
+            await reloadFiles();
             if (canvasPath() === path) {
               setCanvasPath(null);
+              setView("editor");
+            }
+            if (imagePath() === path) {
+              setImagePath(null);
               setView("editor");
             }
           } else if (current() === path) {
@@ -1042,23 +1106,30 @@ export default function App() {
 
   const isCanvas = (p: string) => /\.canvas$/i.test(p);
 
+  /** Không phải note: canvas và ảnh — thao tác file đi thẳng trên đĩa,
+   *  không qua `rename_note` (vốn ép .md và rewrite wikilink). */
+  const isPlainFile = (p: string) => isCanvas(p) || isImagePath(p);
+
   /** Note + canvas trộn chung cho sidebar — canvas không nằm trong index nên
    *  phải ghép ở đây, nhưng KHÔNG đụng vào `notes()` (omnibar, autocomplete
    *  wikilink, graph… chỉ được thấy .md). */
   const treeFiles = createMemo<TreeFile[]>(() => [
     ...notes(),
     ...canvases().map((p) => ({ path: p, title: fileLabel(p), mtime: 0, canvas: true })),
+    ...assets().map((p) => ({ path: p, title: fileLabel(p), mtime: 0, image: true })),
   ]);
 
   /** Mở đúng loại view theo đuôi file (bookmark, cửa sổ rời, sau khi move…). */
-  const openByPath = async (p: string) => (isCanvas(p) ? openCanvas(p) : await openNote(p));
+  const openByPath = async (p: string) =>
+    isCanvas(p) ? openCanvas(p) : isImagePath(p) ? openImage(p) : await openNote(p);
 
   const openInNewTab = async (p: string) => {
-    if (!isCanvas(p)) return openNoteInNewTab(p);
+    if (!isPlainFile(p)) return openNoteInNewTab(p);
     const t = blankTab();
     setTabs((ts) => [...ts, t]);
     setActiveId(t.id);
-    openCanvas(p);
+    if (isCanvas(p)) openCanvas(p);
+    else openImage(p);
   };
 
   const copyText = async (text: string, what: string) => {
@@ -1120,12 +1191,13 @@ export default function App() {
     if (to === path) return;
     try {
       editor.flush();
-      if (isCanvas(path)) {
+      if (isPlainFile(path)) {
         await api.renameFile(path, to);
-        setCanvases(await api.listCanvases().catch(() => []));
+        await reloadFiles();
         retargetTabs(path, to);
         if (canvasPath() === path) openCanvas(to);
-        say("Đã di chuyển canvas");
+        if (imagePath() === path) openImage(to);
+        say(isCanvas(path) ? "Đã di chuyển canvas" : "Đã di chuyển ảnh");
       } else {
         const n = await api.renameNote(path, to);
         applyInfo(await api.refresh());
@@ -1163,9 +1235,10 @@ export default function App() {
   const duplicateFile = async (path: string) => {
     try {
       const rel = await api.duplicateNote(path);
-      if (isCanvas(path)) {
-        setCanvases(await api.listCanvases().catch(() => []));
-        openCanvas(rel);
+      if (isPlainFile(path)) {
+        await reloadFiles();
+        if (isCanvas(rel)) openCanvas(rel);
+        else openImage(rel);
       } else {
         applyInfo(await api.refresh());
         await openNote(rel);
@@ -1432,7 +1505,7 @@ export default function App() {
   const vaultChanged = async () => {
     try {
       applyInfo(await api.refresh());
-      setCanvases(await api.listCanvases().catch(() => []));
+      await reloadFiles();
       const p = currentPath;
       if (p) {
         const content = await api.readNote(p);
@@ -1450,7 +1523,7 @@ export default function App() {
   const externalChanged = async (paths: string[]) => {
     try {
       applyInfo(await api.refresh());
-      setCanvases(await api.listCanvases().catch(() => []));
+      await reloadFiles();
     } catch (e) {
       say(String(e));
     }
@@ -1737,6 +1810,8 @@ export default function App() {
         setSel(s);
         if (!s) setAiOpen(false);
       },
+      // Dán ảnh xong file mới nằm trong assets/ nhưng cây chưa biết — nạp lại.
+      onAssetAdded: () => void reloadFiles(),
     });
 
     // Khôi phục phiên: đọc store rồi mở lại vault gần nhất (kèm tab + tree state).
@@ -1892,7 +1967,7 @@ export default function App() {
             title="Re-index"
             onClick={async () => {
               applyInfo(await api.refresh());
-              setCanvases(await api.listCanvases().catch(() => []));
+              await reloadFiles();
               say(`Re-indexed (${stats()?.index_ms}ms)`);
             }}
           >
@@ -1934,7 +2009,7 @@ export default function App() {
               notes={treeFiles()}
               dirs={dirs()}
               filter={""}
-              current={view() === "canvas" ? canvasPath() : current()}
+              current={view() === "canvas" ? canvasPath() : view() === "image" ? imagePath() : current()}
               editing={treeEditing()}
               closedDirs={closedDirs()}
               onOpen={(p) => void openByPath(p)}
@@ -2016,12 +2091,25 @@ export default function App() {
             <Show when={view() === "canvas"}>
               <IconCanvas />
             </Show>
-            {view() === "graph" ? "Graph view" : view() === "canvas" ? canvasPath() ?? "" : current() ?? ""}
+            <Show when={view() === "image"}>
+              <IconImage />
+            </Show>
+            {view() === "graph"
+              ? "Graph view"
+              : view() === "canvas"
+                ? canvasPath() ?? ""
+                : view() === "image"
+                  ? imagePath() ?? ""
+                  : current() ?? ""}
           </span>
           <Show when={view() === "editor" && current()}>
             <button title="Lịch sử phiên bản (mọi thay đổi của bạn & AI)" onClick={openHistory}><IconHistory /></button>
             <button title="Đổi tên / di chuyển" onClick={renameCurrent}><IconRename /></button>
             <button title="Chuyển vào thùng rác" onClick={trashCurrent}><IconTrash /></button>
+          </Show>
+          <Show when={view() === "image" && imagePath()}>
+            <button title="Đổi tên / di chuyển" onClick={() => moveFileTo(imagePath()!)}><IconRename /></button>
+            <button title="Chuyển vào thùng rác" onClick={() => trashNoteAt(imagePath()!)}><IconTrash /></button>
           </Show>
         </div>
         <div
@@ -2053,6 +2141,9 @@ export default function App() {
         </Show>
         <Show when={view() === "graph"}>
           <GraphView onOpen={openNote} />
+        </Show>
+        <Show when={view() === "image" && imagePath()} keyed>
+          {(p) => <ImageView path={p as string} />}
         </Show>
         <Show when={view() === "canvas" && canvasPath()} keyed>
           {(p) => (

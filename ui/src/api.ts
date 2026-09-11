@@ -86,6 +86,8 @@ export const api = {
   janitorDismiss: (actionId: number) => invoke<void>("janitor_dismiss", { actionId }),
   graphData: () => invoke<GraphData>("graph_data"),
   listCanvases: () => invoke<string[]>("list_canvases"),
+  /** Ảnh trong vault (không nằm trong index note) — sidebar hiện chung cây. */
+  listAssets: () => invoke<string[]>("list_assets"),
   saveAsset: (name: string, dataBase64: string) =>
     invoke<string>("save_asset", { name, dataBase64 }),
   importAsset: (src: string) => invoke<string>("import_asset", { src }),

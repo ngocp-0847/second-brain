@@ -10,9 +10,10 @@ export interface TreeEditing {
   kind: "note" | "dir";
 }
 
-/** Một file trong cây. `canvas` để hiện badge và mở đúng view. */
+/** Một file trong cây. `canvas`/`image` để hiện badge và mở đúng view. */
 export interface TreeFile extends NoteMeta {
   canvas?: boolean;
+  image?: boolean;
 }
 
 interface DirNode {
@@ -179,6 +180,9 @@ function Dir(props: DirProps) {
             </Show>
             <Show when={f.canvas}>
               <span class="canvas-badge">CANVAS</span>
+            </Show>
+            <Show when={f.image}>
+              <span class="canvas-badge">ẢNH</span>
             </Show>
           </div>
         )}

@@ -308,11 +308,13 @@ fn rename_note(from: String, to: String, state: State<AppState>) -> CmdResult<us
 #[tauri::command]
 fn trash_note(path: String, state: State<AppState>) -> CmdResult<()> {
     // Snapshot nội dung trước khi vào thùng rác — xóa nhầm vẫn cứu được từ 🕘.
+    // Chỉ note mới có nội dung text; ảnh/canvas đọc ra rỗng, snapshot chỉ tạo rác.
+    let is_note = path.to_lowercase().ends_with(".md");
     let content = with_vault(&state, |v| {
         let abs = v.abs_path(&path)?;
         Ok(std::fs::read_to_string(abs).unwrap_or_default())
     });
-    if let Ok(c) = content {
+    if let (true, Ok(c)) = (is_note, content) {
         with_history(&state, |h| h.track(&path, &c, true, None));
     }
     with_vault(&state, |v| v.trash_note(&path))
@@ -829,30 +831,49 @@ fn graph_data(state: State<AppState>) -> CmdResult<GraphData> {
 }
 
 /// Liệt kê file .canvas trong vault (định dạng JSON Canvas tương thích Obsidian).
-#[tauri::command]
-fn list_canvases(state: State<AppState>) -> CmdResult<Vec<String>> {
-    with_vault(&state, |v| {
-        let mut out = Vec::new();
-        for entry in walkdir::WalkDir::new(&v.root)
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                !(e.file_type().is_dir()
-                    && [".brain", ".obsidian", ".trash", ".git"].contains(&name.as_ref()))
-            })
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file()
-                && entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("canvas"))
-            {
-                if let Ok(rel) = entry.path().strip_prefix(&v.root) {
-                    out.push(rel.to_string_lossy().replace('\\', "/"));
-                }
+/// File trong vault (bỏ qua thư mục hệ thống) có đuôi nằm trong `exts`,
+/// trả path tương đối đã chuẩn hóa dấu `/`, sắp xếp sẵn.
+fn list_by_ext(root: &std::path::Path, exts: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(e.file_type().is_dir()
+                && [".brain", ".obsidian", ".trash", ".git"].contains(&name.as_ref()))
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let ok = entry
+            .path()
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| exts.iter().any(|e| x.eq_ignore_ascii_case(e)));
+        if ok {
+            if let Ok(rel) = entry.path().strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
-        out.sort();
-        Ok(out)
-    })
+    }
+    out.sort();
+    out
+}
+
+#[tauri::command]
+fn list_canvases(state: State<AppState>) -> CmdResult<Vec<String>> {
+    with_vault(&state, |v| Ok(list_by_ext(&v.root, &["canvas"])))
+}
+
+/// Ảnh trong vault. Không nằm trong index note nên sidebar phải nạp riêng —
+/// thiếu nó thì dán ảnh xong `assets/` hiện ra mà rỗng không.
+const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
+
+#[tauri::command]
+fn list_assets(state: State<AppState>) -> CmdResult<Vec<String>> {
+    with_vault(&state, |v| Ok(list_by_ext(&v.root, &IMAGE_EXTS)))
 }
 
 fn hit_dto(h: vault_core::db::SearchHit) -> SearchHitDto {
@@ -933,6 +954,7 @@ pub fn run() {
             janitor_dismiss,
             graph_data,
             list_canvases,
+            list_assets,
             save_asset,
             import_asset,
             read_asset
