@@ -77,6 +77,7 @@ import {
   IconTree,
   IconUnbookmark,
   IconVault,
+  IconVaultSwitch,
 } from "./icons";
 import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { TermPanel } from "./terminal";
@@ -1871,6 +1872,19 @@ export default function App() {
       </nav>
 
       <aside class="sidebar">
+        {/* Nút chuyển vault nằm ngay đầu sidebar: icon Library dưới ribbon quá kín,
+            người dùng không tìm ra. Ở đây nó mang luôn tên vault đang mở. */}
+        <button
+          class="vault-switch"
+          title={root() ? `Vault: ${root()} — bấm để chuyển vault khác` : "Bấm để chọn thư mục vault"}
+          onClick={() => setVaultOpen(true)}
+        >
+          <IconVault class="vault-switch-icon" />
+          <span class="vault-switch-name">
+            {root() ? vaultName(root()!) : "Chọn vault…"}
+          </span>
+          <IconVaultSwitch class="vault-switch-arrow" />
+        </button>
         <div class="sidebar-head">
           <button title="Note mới (Ctrl+N)" onClick={newNote}><IconNewNote /></button>
           <button title="Folder mới" onClick={newFolder}><IconNewFolder /></button>
@@ -2531,6 +2545,11 @@ export default function App() {
           <div class="prompt-modal settings-modal" onClick={(e) => e.stopPropagation()}>
             <div class="prompt-title">Vault</div>
             <div class="settings-body">
+              <Show when={root()}>
+                <div class="vault-current" title={root()!}>
+                  Đang mở: <b>{vaultName(root()!)}</b> — {root()}
+                </div>
+              </Show>
               <Show
                 when={recentVaults().length > 0}
                 fallback={<div class="recent-empty">Chưa mở vault nào.</div>}

@@ -18,6 +18,7 @@ export {
   Bot as IconAgent,
   Terminal as IconTerminal,
   Library as IconVault,
+  ChevronsUpDown as IconVaultSwitch,
   Settings as IconSettings,
   Sun as IconLight,
   Moon as IconDark,
