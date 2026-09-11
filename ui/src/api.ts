@@ -72,6 +72,8 @@ export const api = {
   search: (query: string, limit = 20) =>
     invoke<SearchHit[]>("search_notes", { query, limit }),
   backlinks: (path: string) => invoke<Backlink[]>("backlinks", { path }),
+  /** Note nào đang nhúng file này — backlinks cho ảnh. */
+  assetUsage: (path: string) => invoke<Backlink[]>("asset_usage", { path }),
   resolveLink: (target: string) =>
     invoke<string | null>("resolve_link", { target }),
   relatedNotes: (path: string) => invoke<RelatedNote[]>("related_notes", { path }),
@@ -86,6 +88,8 @@ export const api = {
   janitorDismiss: (actionId: number) => invoke<void>("janitor_dismiss", { actionId }),
   graphData: () => invoke<GraphData>("graph_data"),
   listCanvases: () => invoke<string[]>("list_canvases"),
+  /** Ảnh trong vault (không nằm trong index note) — sidebar hiện chung cây. */
+  listAssets: () => invoke<string[]>("list_assets"),
   saveAsset: (name: string, dataBase64: string) =>
     invoke<string>("save_asset", { name, dataBase64 }),
   importAsset: (src: string) => invoke<string>("import_asset", { src }),

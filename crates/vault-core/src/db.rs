@@ -323,6 +323,36 @@ impl Db {
         Ok(rows)
     }
 
+    /// Note nào đang nhúng một file KHÔNG phải note (ảnh, pdf…).
+    ///
+    /// Không dùng được `backlinks`: đích không có hàng trong `note` nên
+    /// `target_note` luôn NULL, không join được. Ở đây so thẳng `target_path`,
+    /// chấp nhận cả dạng chỉ có tên file (`![[a.png]]` kiểu Obsidian) lẫn dạng
+    /// đủ đường dẫn (`![[assets/a.png]]`, `![](assets/a.png)`).
+    pub fn asset_usage(&self, rel: &str) -> Result<Vec<BacklinkRow>> {
+        let rel = rel.replace('\\', "/");
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let mut stmt = self.conn.prepare(
+            r#"SELECT s.path, s.title, MIN(l.kind), MIN(l.src_offset)
+               FROM link l JOIN note s ON s.id = l.src_note
+               WHERE l.target_path = ?1 COLLATE NOCASE
+                  OR l.target_path = ?2 COLLATE NOCASE
+               GROUP BY s.id
+               ORDER BY s.path"#,
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![rel, name], |r| {
+                Ok(BacklinkRow {
+                    src_path: r.get(0)?,
+                    src_title: r.get(1)?,
+                    kind: r.get(2)?,
+                    offset: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn broken_links(&self) -> Result<Vec<BrokenLinkRow>> {
         let mut stmt = self.conn.prepare(
             r#"SELECT s.path, l.target_path, l.kind

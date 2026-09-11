@@ -436,6 +436,34 @@ mod tests {
     }
 
     #[test]
+    fn asset_usage_finds_embeds() {
+        let tmp = std::env::temp_dir().join(format!("brain-asset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Ba cách nhúng một ảnh: đủ path, chỉ tên file, và link markdown.
+        write(&tmp, "a.md", "# Alpha\n![[assets/pic.png]]\n![[assets/pic.png|chú thích]]\n");
+        write(&tmp, "b.md", "# Beta\n![[pic.png]]\n");
+        write(&tmp, "c.md", "# Gamma\n![alt](assets/pic.png)\n");
+        write(&tmp, "d.md", "# Delta\nKhông nhúng gì.\n");
+        std::fs::create_dir_all(tmp.join("assets")).unwrap();
+        std::fs::write(tmp.join("assets/pic.png"), [0u8, 1, 2]).unwrap();
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+
+        let used = v.db.asset_usage("assets/pic.png").unwrap();
+        let paths: Vec<_> = used.iter().map(|u| u.src_path.as_str()).collect();
+        // Mỗi note đúng MỘT dòng dù a.md nhúng hai lần.
+        assert_eq!(paths, vec!["a.md", "b.md", "c.md"]);
+
+        assert!(v.db.asset_usage("assets/khong-co.png").unwrap().is_empty());
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn index_and_query_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("brain-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

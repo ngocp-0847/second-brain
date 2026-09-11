@@ -6,8 +6,8 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import { createSignal } from "solid-js";
 
 export interface PersistedTab {
-  kind: "empty" | "note" | "graph" | "canvas";
-  /** note: path .md · canvas: path .canvas · graph/empty: null */
+  kind: "empty" | "note" | "graph" | "canvas" | "image";
+  /** note: path .md · canvas: path .canvas · image: path ảnh · graph/empty: null */
   path: string | null;
   /** Tab ghim. Lịch sử điều hướng KHÔNG lưu — mở lại app là bắt đầu lại. */
   pinned?: boolean;

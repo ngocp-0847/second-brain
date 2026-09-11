@@ -71,6 +71,8 @@ interface EditorOpts {
   onOpenLink: (target: string) => void;
   /** Vùng chọn đổi (null = không còn chọn gì) — App dùng để hiện nút "Sửa bằng AI". */
   onSelection?: (sel: SelectionInfo | null) => void;
+  /** Vừa lưu một ảnh dán vào vault — App nạp lại cây file cho ảnh hiện ra. */
+  onAssetAdded?: (path: string) => void;
   /** Theme lúc khởi tạo; đổi sau bằng handle.setDark(). Mặc định dark. */
   dark?: boolean;
 }
@@ -460,7 +462,7 @@ class ImageWidget extends WidgetType {
 // Clipboard chứa file ảnh (screenshot, "copy image" trên web, copy file trong
 // Explorer) thì text/plain thường rỗng — CodeMirror dán xong chẳng có gì, nhìn
 // như app hỏng. Lưu file vào assets/ rồi chèn `![[...]]` để live preview render.
-async function insertPastedImages(view: EditorView, files: File[]) {
+async function insertPastedImages(view: EditorView, files: File[], onAdded?: (p: string) => void) {
   for (const f of files) {
     let rel: string;
     try {
@@ -483,6 +485,7 @@ async function insertPastedImages(view: EditorView, files: File[]) {
       scrollIntoView: true,
       userEvent: "input.paste",
     });
+    onAdded?.(rel);
   }
 }
 
@@ -933,7 +936,7 @@ export function createEditor(opts: EditorOpts): EditorHandle {
             const imgs = imageFilesOf(e.clipboardData);
             if (imgs.length) {
               e.preventDefault();
-              void insertPastedImages(view, imgs);
+              void insertPastedImages(view, imgs, opts.onAssetAdded);
               return true;
             }
             queueMicrotask(() => {
