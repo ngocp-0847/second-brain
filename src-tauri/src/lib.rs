@@ -737,9 +737,8 @@ fn janitor_latest(state: State<AppState>) -> CmdResult<Option<janitor::Report>> 
 }
 
 #[tauri::command]
-fn janitor_apply(action_id: i64, state: State<AppState>) -> CmdResult<String> {
-    let msg = with_vault(&state, |v| janitor::apply_action(v, action_id))?;
-    Ok(msg)
+fn janitor_apply(action_id: i64, state: State<AppState>) -> CmdResult<janitor::Applied> {
+    with_vault(&state, |v| janitor::apply_action_detailed(v, action_id))
 }
 
 #[tauri::command]

@@ -1819,9 +1819,28 @@ export default function App() {
 
   const janitorAct = async (id: number, apply: boolean) => {
     try {
+      // Ghi nốt phần đang gõ TRƯỚC khi janitor đụng vào file: nó có thể đổi tên
+      // đúng note đang mở, lúc đó bản nháp trong editor không còn chỗ để về.
+      editor.flush();
       if (apply) {
-        const msg = await api.janitorApply(id);
-        say(msg);
+        const res = await api.janitorApply(id);
+        say(res.message);
+        // Janitor đổi tên / dọn note ngay dưới chân người dùng — tab và
+        // bookmark phải đi theo, nếu không chúng ôm một path đã chết.
+        if (res.from) {
+          retargetTabs(res.from, res.to);
+          if (res.to) void retargetBookmark(res.from, res.to);
+          else void dropBookmark(res.from);
+          if (current() === res.from) {
+            currentPath = null;
+            if (res.to) {
+              await openNote(res.to);
+            } else {
+              setCurrent(null);
+              editor.setContent("");
+            }
+          }
+        }
       } else {
         await api.janitorDismiss(id);
       }
