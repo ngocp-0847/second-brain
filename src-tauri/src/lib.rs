@@ -897,6 +897,19 @@ fn backlinks(path: String, state: State<AppState>) -> CmdResult<Vec<BacklinkDto>
     })
 }
 
+/// Note nào đang nhúng file này — "backlinks" cho ảnh, thứ `backlinks`
+/// thường không trả về được vì ảnh không có hàng trong bảng `note`.
+#[tauri::command]
+fn asset_usage(path: String, state: State<AppState>) -> CmdResult<Vec<BacklinkDto>> {
+    with_vault(&state, |v| {
+        Ok(v.db
+            .asset_usage(&path)?
+            .into_iter()
+            .map(|b| BacklinkDto { src_path: b.src_path, src_title: b.src_title, kind: b.kind })
+            .collect())
+    })
+}
+
 #[tauri::command]
 fn resolve_link(target: String, state: State<AppState>) -> CmdResult<Option<String>> {
     with_vault(&state, |v| v.db.resolve_target(&target))
@@ -927,6 +940,7 @@ pub fn run() {
             open_note_window,
             search_notes,
             backlinks,
+            asset_usage,
             resolve_link,
             related_notes,
             unlinked_mentions,

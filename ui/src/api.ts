@@ -72,6 +72,8 @@ export const api = {
   search: (query: string, limit = 20) =>
     invoke<SearchHit[]>("search_notes", { query, limit }),
   backlinks: (path: string) => invoke<Backlink[]>("backlinks", { path }),
+  /** Note nào đang nhúng file này — backlinks cho ảnh. */
+  assetUsage: (path: string) => invoke<Backlink[]>("asset_usage", { path }),
   resolveLink: (target: string) =>
     invoke<string | null>("resolve_link", { target }),
   relatedNotes: (path: string) => invoke<RelatedNote[]>("related_notes", { path }),

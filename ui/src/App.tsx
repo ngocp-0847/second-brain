@@ -526,6 +526,23 @@ export default function App() {
     setRelated(await api.relatedNotes(path).catch(() => []));
   };
 
+  /** Panel phải luôn nói về thứ đang mở. Tab canvas/graph/trống không có gì
+   *  để nói — phải dọn, nếu không nó treo backlinks của note mở trước đó. */
+  const clearPanels = () => {
+    if (panelTimer) clearTimeout(panelTimer);
+    setBacklinks([]);
+    setMentions([]);
+    setRelated([]);
+  };
+
+  /** Ảnh cũng có "backlinks" riêng: note nào đang nhúng nó. */
+  const loadAssetPanels = async (path: string) => {
+    if (panelTimer) clearTimeout(panelTimer);
+    setMentions([]);
+    setRelated([]);
+    setBacklinks(await api.assetUsage(path).catch(() => []));
+  };
+
   /** Nạp panel phải sau khi ngừng gõ — cả 3 query đều thuần SQL nên rẻ. */
   let panelTimer: ReturnType<typeof setTimeout> | undefined;
   const schedulePanels = (path: string) => {
@@ -560,6 +577,7 @@ export default function App() {
     if (currentPath) editor.flush();
     currentPath = null;
     setCurrent(null);
+    clearPanels();
     setCanvasPath(path);
     setView("canvas");
     updateTab(activeId(), { kind: "canvas", path });
@@ -571,6 +589,7 @@ export default function App() {
     if (currentPath) editor.flush();
     currentPath = null;
     setCurrent(null);
+    void loadAssetPanels(path);
     setImagePath(path);
     setView("image");
     updateTab(activeId(), { kind: "image", path });
@@ -596,14 +615,18 @@ export default function App() {
     }
     setCurrent(null);
     if (t.kind === "canvas" && t.path) {
+      clearPanels();
       setCanvasPath(t.path);
       setView("canvas");
     } else if (t.kind === "image" && t.path) {
+      void loadAssetPanels(t.path);
       setImagePath(t.path);
       setView("image");
     } else if (t.kind === "graph") {
+      clearPanels();
       setView("graph");
     } else {
+      clearPanels();
       setView("editor");
       editor.setContent("");
     }
@@ -1113,6 +1136,13 @@ export default function App() {
   /** Note + canvas trộn chung cho sidebar — canvas không nằm trong index nên
    *  phải ghép ở đây, nhưng KHÔNG đụng vào `notes()` (omnibar, autocomplete
    *  wikilink, graph… chỉ được thấy .md). */
+  /** File đang mở của tab hiện tại, bất kể loại view. Một nguồn duy nhất cho
+   *  highlight trong tree/bookmark và auto-reveal — trước đây mỗi chỗ tự suy ra
+   *  một kiểu nên canvas/ảnh không bao giờ được tô. */
+  const activePath = createMemo(() =>
+    view() === "canvas" ? canvasPath() : view() === "image" ? imagePath() : current(),
+  );
+
   const treeFiles = createMemo<TreeFile[]>(() => [
     ...notes(),
     ...canvases().map((p) => ({ path: p, title: fileLabel(p), mtime: 0, canvas: true })),
@@ -1120,8 +1150,20 @@ export default function App() {
   ]);
 
   /** Mở đúng loại view theo đuôi file (bookmark, cửa sổ rời, sau khi move…). */
-  const openByPath = async (p: string) =>
-    isCanvas(p) ? openCanvas(p) : isImagePath(p) ? openImage(p) : await openNote(p);
+  /** Obsidian: bấm file đang mở ở tab khác thì nhảy sang tab đó, không mở trùng. */
+  const focusTabWith = (p: string) => {
+    const t = tabs().find((x) => x.path === p && x.kind !== "graph");
+    if (!t) return false;
+    if (t.id !== activeId()) void switchTab(t.id);
+    return true;
+  };
+
+  const openByPath = async (p: string) => {
+    if (focusTabWith(p)) return;
+    if (isCanvas(p)) return openCanvas(p);
+    if (isImagePath(p)) return openImage(p);
+    await openNote(p);
+  };
 
   const openInNewTab = async (p: string) => {
     if (!isPlainFile(p)) return openNoteInNewTab(p);
@@ -1282,8 +1324,10 @@ export default function App() {
     ...fileActions(path),
   ];
 
-  /** Bung mọi folder cha rồi cuộn tới note trong sidebar ("Reveal file in navigation"). */
-  const revealInTree = (path: string) => {
+  /** Bung mọi folder cha rồi cuộn tới note trong sidebar ("Reveal file in navigation").
+   *  `soft`: chỉ cuộn khi dòng đang khuất — dùng cho auto-reveal, cuộn vô cớ làm
+   *  nhảy danh sách ngay dưới tay người đang xem chỗ khác. */
+  const revealInTree = (path: string, soft = false) => {
     const parts = path.split("/").slice(0, -1);
     const ancestors = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
     setClosedDirs((s) => {
@@ -1293,11 +1337,24 @@ export default function App() {
     });
     // Đợi <details> mở xong rồi mới cuộn, nếu không phần tử còn đang ẩn.
     setTimeout(() => {
-      document
-        .querySelector(`.tree-file[data-path="${CSS.escape(path)}"]`)
-        ?.scrollIntoView({ block: "center" });
+      const el = document.querySelector(`.tree-file[data-path="${CSS.escape(path)}"]`);
+      if (!el) return;
+      const box = el.closest(".tree-scroll");
+      if (soft && box) {
+        const a = el.getBoundingClientRect();
+        const b = box.getBoundingClientRect();
+        if (a.top >= b.top && a.bottom <= b.bottom) return; // đã nhìn thấy
+      }
+      el.scrollIntoView({ block: "center" });
     }, 0);
   };
+
+  // Obsidian "Auto-reveal current file": đổi file đang mở thì sidebar bung folder
+  // cha và cuộn tới đúng dòng, khỏi phải tự đi tìm mình đang ở đâu trong cây.
+  createEffect(() => {
+    const p = activePath();
+    if (p) revealInTree(p, true);
+  });
 
   /** Menu chuột phải trên một TAB: nhóm đóng/ghim, rồi thao tác file nếu tab có file. */
   const tabMenu = (t: TabState): MenuItem[] => {
@@ -1987,7 +2044,7 @@ export default function App() {
                     {(b) => (
                       <div
                         class="tree-file"
-                        classList={{ active: current() === b.path }}
+                        classList={{ active: activePath() === b.path }}
                         onClick={(e) =>
                           e.ctrlKey ? void openInNewTab(b.path) : void openByPath(b.path)
                         }
@@ -2009,7 +2066,7 @@ export default function App() {
               notes={treeFiles()}
               dirs={dirs()}
               filter={""}
-              current={view() === "canvas" ? canvasPath() : view() === "image" ? imagePath() : current()}
+              current={activePath()}
               editing={treeEditing()}
               closedDirs={closedDirs()}
               onOpen={(p) => void openByPath(p)}
@@ -2408,7 +2465,9 @@ export default function App() {
       </main>
 
       <aside class="rightbar">
-        <div class="panel-title">Backlinks ({backlinks().length})</div>
+        <div class="panel-title">
+          {view() === "image" ? "Dùng trong" : "Backlinks"} ({backlinks().length})
+        </div>
         <For each={backlinks()}>
           {(b) => (
             <div class="backlink" onClick={() => openNote(b.src_path)} title={b.src_path}>
@@ -2417,8 +2476,12 @@ export default function App() {
             </div>
           )}
         </For>
-        <Show when={current() && backlinks().length === 0}>
-          <div class="tree-empty">Chưa có note nào link tới đây</div>
+        <Show when={activePath() && backlinks().length === 0}>
+          <div class="tree-empty">
+            {view() === "image"
+              ? "Chưa note nào nhúng ảnh này"
+              : "Chưa có note nào link tới đây"}
+          </div>
         </Show>
 
         <Show when={mentions().length > 0}>
