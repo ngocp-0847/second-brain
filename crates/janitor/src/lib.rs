@@ -6,6 +6,7 @@
 //! chỉ chuyển vào .brain/trash.
 
 pub mod restructure;
+pub mod skills;
 mod title;
 
 use anyhow::{Context, Result};
@@ -32,6 +33,10 @@ pub enum Apply {
     WriteMoc { path: String, content: String },
     /// Đặt tên cho note còn tên mặc định: sửa H1 placeholder rồi đổi tên file.
     RetitleNote { path: String, title: String },
+    /// Chuyển note sang thư mục khác (skill của người dùng).
+    MoveNote { path: String, to_dir: String },
+    /// Thêm tag vào frontmatter của note.
+    AddTag { path: String, tag: String },
     /// Chỉ thông tin, không có hành động.
     None,
 }
@@ -405,6 +410,33 @@ fn execute(vault: &mut Vault, apply: &Apply) -> Result<Applied> {
                 to: Some(new_rel),
             })
         }
+        Apply::MoveNote { path, to_dir } => {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let to = if to_dir.is_empty() { name.to_string() } else { format!("{to_dir}/{name}") };
+            if to == *path {
+                return Ok(Applied { message: "note đã ở đúng chỗ".into(), from: None, to: None });
+            }
+            let n = vault.rename_note(path, &to)?;
+            Ok(Applied {
+                message: format!("đã chuyển → {to} (rewrite {n} link)"),
+                from: Some(path.clone()),
+                to: Some(to),
+            })
+        }
+        Apply::AddTag { path, tag } => {
+            let abs = vault.abs_path(path)?;
+            let body = std::fs::read_to_string(&abs)?;
+            let Some(next) = skills::with_tag(&body, tag) else {
+                return Ok(Applied { message: format!("note đã có #{tag}"), from: None, to: None });
+            };
+            std::fs::write(&abs, next)?;
+            vault.index()?;
+            Ok(Applied {
+                message: format!("đã gắn #{tag}"),
+                from: Some(path.clone()),
+                to: Some(path.clone()),
+            })
+        }
         Apply::None => Ok(Applied { message: "không có hành động".into(), from: None, to: None }),
     }
 }
@@ -426,6 +458,85 @@ fn retitle_h1(body: &str, title: &str) -> Option<String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// Một nhịp heartbeat: chạy skill của người dùng, chèn action vào run gần nhất
+/// (tạo run mới nếu chưa có). `auto` được thực thi ngay, có snapshot; còn lại
+/// nằm chờ duyệt trong report như mọi đề xuất khác.
+pub fn run_skills(vault: &mut Vault, provider: qa::Provider) -> Result<Vec<ActionRow>> {
+    ensure_schema(vault)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let all = skills::list(&vault.root)?;
+    let since = skills::scan_since(&all, now);
+    vault.index()?;
+    let findings = skills::run_once(vault, provider, since)?;
+    // Đánh dấu đã soi tới đây kể cả khi không ra action nào — lần sau khỏi
+    // hỏi lại LLM đúng những note cũ.
+    skills::mark_run(&vault.root, now)?;
+    if findings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let run_id: i64 = match vault
+        .db
+        .conn
+        .query_row("SELECT id FROM janitor_run ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+    {
+        Ok(id) => id,
+        Err(_) => {
+            vault.db.conn.execute(
+                "INSERT INTO janitor_run (ts, snapshotted) VALUES (?1, 0)",
+                [now],
+            )?;
+            vault.db.conn.last_insert_rowid()
+        }
+    };
+
+    let mut rows = Vec::new();
+    for f in findings {
+        let snapshotted = if f.severity == "auto" {
+            snapshot(&vault.root, "trước khi chạy skill").unwrap_or(false)
+        } else {
+            false
+        };
+        // Không snapshot được thì hạ auto xuống propose — đúng nguyên tắc §8.1.
+        let severity = if f.severity == "auto" && !snapshotted { "propose" } else { f.severity };
+        let mut status = if severity == "auto" { "applied" } else { "pending" };
+        let mut description = f.description.clone();
+        if severity == "auto" {
+            match execute(vault, &f.payload) {
+                Ok(a) => description = format!("{description} — {}", a.message),
+                Err(e) => {
+                    status = "pending";
+                    description = format!("{description} — auto thất bại ({e}), chờ duyệt");
+                }
+            }
+        }
+        vault.db.conn.execute(
+            r#"INSERT INTO janitor_action (run_id, rule, severity, description, status, payload)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+            rusqlite::params![
+                run_id,
+                f.rule,
+                severity,
+                description,
+                status,
+                serde_json::to_string(&f.payload)?
+            ],
+        )?;
+        rows.push(ActionRow {
+            id: vault.db.conn.last_insert_rowid(),
+            rule: f.rule.into(),
+            severity: severity.into(),
+            description,
+            status: status.into(),
+            payload: f.payload,
+        });
+    }
+    Ok(rows)
 }
 
 /// Tầng 2 (LLM): chạy SAU `run`, chèn proposals vào lần chạy gần nhất.

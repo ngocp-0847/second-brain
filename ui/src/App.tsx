@@ -14,6 +14,7 @@ import {
   type AnswerDto,
   type Backlink,
   type JanitorReport,
+  type Skill,
   type LlmSettings,
   type McpInfo,
   type PluginInfo,
@@ -246,6 +247,10 @@ export default function App() {
   const [janitorReport, setJanitorReport] = createSignal<JanitorReport | null>(null);
   const [janitorBusy, setJanitorBusy] = createSignal(false);
   const [janitorBadge, setJanitorBadge] = createSignal(false);
+  // Rules: luật thường trực, agent chạy lại mỗi giờ (heartbeat ở backend).
+  const [skills, setSkills] = createSignal<Skill[]>([]);
+  const [newRule, setNewRule] = createSignal("");
+  const [skillBusy, setSkillBusy] = createSignal(false);
 
   // Revision history (🕘) của note đang mở
   const [historyOpen, setHistoryOpen] = createSignal(false);
@@ -1707,6 +1712,7 @@ export default function App() {
   };
 
   const openSettings = async () => {
+    void loadSkills();
     setSettingsOpen(true);
     try {
       setLlm(await api.getLlmSettings());
@@ -1817,7 +1823,65 @@ export default function App() {
     }
   };
 
+  const loadSkills = async () => setSkills(await api.skillsList().catch(() => []));
+
+  const saveSkill = async (s: Skill) => {
+    try {
+      await api.skillsSave(s);
+      await loadSkills();
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  const addSkill = async () => {
+    const rule = newRule().trim();
+    if (!rule) return;
+    setNewRule("");
+    await saveSkill({
+      id: "",
+      name: "",
+      enabled: true,
+      autonomy: "propose",
+      created: 0,
+      last_run: 0,
+      rule,
+    });
+    say("Đã thêm rule — agent sẽ áp dụng ở nhịp chạy tới");
+  };
+
+  const removeSkill = async (s: Skill) => {
+    askConfirm(
+      {
+        title: "Xóa rule",
+        message: `Xóa rule "${s.name}"?`,
+        detail: "Agent sẽ không áp dụng luật này nữa. Muốn giữ lại thì tắt công tắc thay vì xóa.",
+        confirmLabel: "Xóa",
+      },
+      async () => {
+        try {
+          await api.skillsDelete(s.id);
+          await loadSkills();
+        } catch (e) {
+          say(String(e));
+        }
+      },
+    );
+  };
+
+  const runSkillsNow = async () => {
+    setSkillBusy(true);
+    try {
+      await api.skillsRunNow();
+      say("Đang chạy rules…");
+    } catch (e) {
+      setSkillBusy(false);
+      say(String(e));
+    }
+  };
+
   const janitorAct = async (id: number, apply: boolean) => {
+
     try {
       // Ghi nốt phần đang gõ TRƯỚC khi janitor đụng vào file: nó có thể đổi tên
       // đúng note đang mở, lúc đó bản nháp trong editor không còn chỗ để về.
@@ -1925,6 +1989,12 @@ export default function App() {
       setJanitorReport(e.payload);
       setJanitorBadge(true);
     });
+    // Nhịp chạy rules xong (do heartbeat hoặc nút "Chạy ngay").
+    const unlistenSkill = listen<string>("skill-run-done", (e) => {
+      setSkillBusy(false);
+      say(e.payload);
+      void loadSkills();
+    });
     const unlistenVault = listen<{ paths: string[] }>("vault-changed", (e) => {
       void externalChanged(e.payload.paths);
     });
@@ -1938,6 +2008,7 @@ export default function App() {
     });
     onCleanup(() => {
       unlistenJanitor.then((f) => f());
+      unlistenSkill.then((f) => f());
       unlistenVault.then((f) => f());
       unlistenAgent.then((f) => f());
     });
@@ -2309,6 +2380,77 @@ export default function App() {
               </For>
               <div class="settings-active">
                 Đang dùng: <b>{llm()?.active ?? "không có provider nào"}</b>
+              </div>
+
+              <div class="settings-section">Rules — agent tự chạy mỗi giờ</div>
+              <div class="settings-hint">
+                Viết luật bằng tiếng Việt, agent soi những note vừa thay đổi và đề xuất
+                việc trong <b>báo cáo janitor</b> (di chuyển vào thư mục, gắn tag). Nói luật
+                trong khung chat cũng được — nó tự lưu xuống đây.
+              </div>
+              <div class="rules">
+                <For each={skills()}>
+                  {(sk) => (
+                    <div class="rule-row" classList={{ off: !sk.enabled }}>
+                      <label class="rule-toggle" title={sk.enabled ? "Đang bật" : "Đang tắt"}>
+                        <input
+                          type="checkbox"
+                          checked={sk.enabled}
+                          onChange={(e) =>
+                            void saveSkill({ ...sk, enabled: e.currentTarget.checked })
+                          }
+                        />
+                      </label>
+                      <div class="rule-body">
+                        <textarea
+                          class="rule-text"
+                          rows={2}
+                          value={sk.rule}
+                          // Lưu khi rời ô: gõ tới đâu ghi file tới đó thì mỗi phím một lần I/O.
+                          onBlur={(e) => {
+                            const rule = e.currentTarget.value.trim();
+                            if (rule && rule !== sk.rule) void saveSkill({ ...sk, rule });
+                          }}
+                        />
+                        <div class="rule-meta">
+                          <select
+                            value={sk.autonomy}
+                            onChange={(e) =>
+                              void saveSkill({ ...sk, autonomy: e.currentTarget.value })
+                            }
+                          >
+                            <option value="propose">Chờ tôi duyệt</option>
+                            <option value="auto">Tự làm luôn</option>
+                          </select>
+                          <span class="rule-when">
+                            {sk.last_run ? `chạy ${fmtAgo(sk.last_run)}` : "chưa chạy lần nào"}
+                          </span>
+                        </div>
+                      </div>
+                      <button class="rule-del" title="Xóa rule" onClick={() => removeSkill(sk)}>
+                        <IconTrash />
+                      </button>
+                    </div>
+                  )}
+                </For>
+                <Show when={skills().length === 0}>
+                  <div class="tree-empty">Chưa có rule nào.</div>
+                </Show>
+                <textarea
+                  class="rule-text"
+                  rows={2}
+                  placeholder="Ví dụ: Các note tôi ghi về spec thì đưa vào folder Daily"
+                  value={newRule()}
+                  onInput={(e) => setNewRule(e.currentTarget.value)}
+                />
+                <div class="rule-actions">
+                  <button class="settings-primary" disabled={!newRule().trim()} onClick={addSkill}>
+                    Thêm rule
+                  </button>
+                  <button disabled={skillBusy() || skills().length === 0} onClick={runSkillsNow}>
+                    {skillBusy() ? "Đang chạy…" : "Chạy ngay"}
+                  </button>
+                </div>
               </div>
 
               <div class="settings-section">Agent ngoài — Claude Code / Codex</div>

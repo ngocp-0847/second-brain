@@ -87,6 +87,11 @@ export const api = {
   janitorApply: (actionId: number) =>
     invoke<JanitorApplied>("janitor_apply", { actionId }),
   janitorDismiss: (actionId: number) => invoke<void>("janitor_dismiss", { actionId }),
+  /** Luật thường trực người dùng đặt ra; agent chạy lại mỗi giờ. */
+  skillsList: () => invoke<Skill[]>("skills_list"),
+  skillsSave: (skill: Skill) => invoke<Skill>("skills_save", { skill }),
+  skillsDelete: (id: string) => invoke<void>("skills_delete", { id }),
+  skillsRunNow: () => invoke<void>("skills_run_now"),
   graphData: () => invoke<GraphData>("graph_data"),
   listCanvases: () => invoke<string[]>("list_canvases"),
   /** Ảnh trong vault (không nằm trong index note) — sidebar hiện chung cây. */
@@ -173,6 +178,19 @@ export interface LlmSettings {
   claude_ok: boolean;
   codex_ok: boolean;
   active: string | null;
+}
+
+/** Một luật thường trực — file `.brain/skills/<id>.md` trong vault. */
+export interface Skill {
+  /** Rỗng khi tạo mới; backend tự sinh từ tên. */
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** `propose` = chờ duyệt trong báo cáo · `auto` = agent làm luôn. */
+  autonomy: string;
+  created: number;
+  last_run: number;
+  rule: string;
 }
 
 export interface JanitorAction {
