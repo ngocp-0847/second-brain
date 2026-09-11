@@ -256,6 +256,17 @@ flowchart LR
 - **Guardrails:** tối đa 3 MOC mỗi lần chạy; MOC còn tươi (<7 ngày) thì bỏ qua; mọi đề xuất **luôn ở mức `propose`** — user duyệt trong report.
 - *Đề xuất di chuyển note giữa các folder từng nằm ở tầng này, dựa trên embedding; đã bỏ cùng với semantic search (§6).*
 
+### 8.2b Skill — luật thường trực của người dùng (heartbeat mỗi giờ)
+
+> "Các file tôi note kiểu về spec thì đưa vào folder Daily"
+
+- Mỗi luật là **một file** `.brain/skills/<id>.md` (frontmatter: `name`, `enabled`, `autonomy`, `created`, `last_run` + nguyên văn câu luật). File chứ không phải SQLite: luật là thứ người dùng phải đọc lại và sửa được, lại nằm sẵn trong git snapshot.
+- **Ghi lại từ chat:** agent được dạy in thêm khối ```` ```brain-rule ```` khi người dùng phát biểu một luật lâu dài; app tách khối đó ra khỏi câu trả lời và lưu thành skill.
+- **Quản lý:** Settings → *Rules* — bật/tắt, sửa câu luật, chọn mức tự trị, xóa, "Chạy ngay".
+- **Heartbeat:** thread trong app ngó mỗi 5 phút, chạy khi có skill quá 1 giờ chưa chạy (mốc *lần gọi* tách khỏi `last_run` để lỗi LLM không làm nó gọi lại mỗi 5 phút).
+- **Một nhịp:** lấy note có `mtime` mới hơn `last_run` (tối đa 30 note, 400 ký tự đầu mỗi note) + danh sách thư mục hiện có → một lượt LLM → JSON kế hoạch.
+- **Guardrails:** chỉ 2 action (`move`, `tag`); path phải nằm trong đúng danh sách vừa gửi; thư mục đích bị chặn `..`, `.brain`, `.obsidian`, `.git`; tối đa 20 action/lần; JSON hỏng → không làm gì. Mọi action đi vào **đúng đường proposal của janitor** (snapshot → report → duyệt), trừ skill người dùng bật `auto`.
+
 ### 8.3 Vòng đời một đêm
 
 ```

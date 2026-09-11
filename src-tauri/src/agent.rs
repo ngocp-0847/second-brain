@@ -35,7 +35,12 @@ fn system_prompt(context_path: Option<&str>) -> String {
          - Giữ nguyên wikilink [[...]] trừ khi được yêu cầu; đổi tên/di chuyển file thì cập nhật mọi link trỏ tới.\n\
          - Trả lời ngắn gọn bằng tiếng Việt, cuối câu trả lời liệt kê file đã thay đổi (nếu có).\n\
          - Nếu có MCP server `second-brain`: ưu tiên tool của nó (search_notes, read_note, \
-           replace_in_note, rename_note…) — rename_note tự rewrite mọi wikilink, trash_note vào thùng rác.\n",
+           replace_in_note, rename_note…) — rename_note tự rewrite mọi wikilink, trash_note vào thùng rác.\n\
+         - Nếu người dùng phát biểu một QUY TẮC LÂU DÀI cho vault (ví dụ \"note về spec thì \
+           đưa vào folder Daily\"), hãy in thêm ở CUỐI câu trả lời một khối:\n\
+           ```brain-rule\n<câu luật viết gọn trong một dòng>\n```\n\
+           App sẽ lưu khối đó thành skill chạy định kỳ. CHỈ in khi đó thật sự là luật áp dụng \
+           về sau — việc làm một lần thì cứ làm, đừng in.\n",
     );
     if let Some(path) = context_path {
         p.push_str(&format!(
@@ -45,6 +50,46 @@ fn system_prompt(context_path: Option<&str>) -> String {
         ));
     }
     p
+}
+
+/// Tách các khối ```brain-rule khỏi câu trả lời của agent.
+///
+/// Trả về (text đã bỏ khối, danh sách luật). App lưu luật thành skill rồi báo lại
+/// cho người dùng — để nguyên khối trong chat thì chỉ là một cục code rác.
+pub fn take_rule_blocks(text: &str) -> (String, Vec<String>) {
+    let mut rules = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    let mut buf: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if !inside && (t == "```brain-rule" || t == "~~~brain-rule") {
+            inside = true;
+            buf.clear();
+            continue;
+        }
+        if inside {
+            if t == "```" || t == "~~~" {
+                inside = false;
+                let rule = buf.join(" ").trim().to_string();
+                if !rule.is_empty() {
+                    rules.push(rule);
+                }
+                continue;
+            }
+            buf.push(line);
+            continue;
+        }
+        kept.push(line);
+    }
+    // Khối chưa đóng (agent bị cắt giữa chừng): vẫn lấy phần đã gom làm luật.
+    if inside {
+        let rule = buf.join(" ").trim().to_string();
+        if !rule.is_empty() {
+            rules.push(rule);
+        }
+    }
+    (kept.join("\n").trim().to_string(), rules)
 }
 
 /// CLI cài qua npm trên Windows là shim `.cmd` → phải chạy qua `cmd /c`.
@@ -312,5 +357,33 @@ mod tests {
     #[test]
     fn leaves_plain_text_alone() {
         assert_eq!(strip_wrapper_fence("\nxin chào\n", "chào"), "xin chào");
+    }
+}
+
+#[cfg(test)]
+mod rule_block_tests {
+    use super::*;
+
+    #[test]
+    fn tach_khoi_brain_rule_khoi_cau_tra_loi() {
+        let text = "Đã chuyển 2 note.\n\n```brain-rule\nNote về spec thì đưa vào folder Daily\n```";
+        let (clean, rules) = take_rule_blocks(text);
+        assert_eq!(clean, "Đã chuyển 2 note.");
+        assert_eq!(rules, vec!["Note về spec thì đưa vào folder Daily".to_string()]);
+    }
+
+    #[test]
+    fn khong_co_khoi_thi_giu_nguyen() {
+        let text = "chỉ là câu trả lời```json\n{}\n```";
+        let (clean, rules) = take_rule_blocks(text);
+        assert_eq!(clean, text);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn khoi_chua_dong_van_lay_duoc_luat() {
+        let (clean, rules) = take_rule_blocks("ok\n```brain-rule\nGắn tag #hop cho note họp");
+        assert_eq!(clean, "ok");
+        assert_eq!(rules.len(), 1);
     }
 }

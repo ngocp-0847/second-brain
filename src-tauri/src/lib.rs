@@ -593,7 +593,7 @@ fn agent_chat(
     let _ = janitor::snapshot(&root, "agent");
     // Agent headless được cắm MCP server của vault: search/backlinks/rename có rewrite link…
     let mcp_cfg = mcp_setup::write_config(&root).ok();
-    agent::chat(
+    let mut reply = agent::chat(
         &app,
         provider,
         &root,
@@ -602,7 +602,38 @@ fn agent_chat(
         session_id.as_deref(),
         mcp_cfg.as_deref(),
     )
-    .map_err(err)
+    .map_err(err)?;
+
+    // Người dùng vừa phát biểu một luật lâu dài → agent in khối ```brain-rule.
+    // Lưu thành skill để heartbeat chạy lại về sau, và nói rõ là đã lưu.
+    let (text, rules) = agent::take_rule_blocks(&reply.text);
+    if !rules.is_empty() {
+        let now = now_secs();
+        let mut saved = Vec::new();
+        for rule in rules {
+            let skill = janitor::skills::Skill {
+                id: String::new(),
+                name: String::new(),
+                enabled: true,
+                autonomy: "propose".into(),
+                created: now,
+                last_run: 0,
+                rule,
+            };
+            if let Ok(s) = janitor::skills::save(&root, skill, now) {
+                saved.push(s.name);
+            }
+        }
+        reply.text = if saved.is_empty() {
+            text
+        } else {
+            format!(
+                "{text}\n\n— Đã lưu thành rule: {} (Settings → Rules để sửa/tắt)",
+                saved.join(", ")
+            )
+        };
+    }
+    Ok(reply)
 }
 
 /// Thông tin MCP server của vault đang mở: exe, lệnh đăng ký, trạng thái từng CLI.
@@ -744,6 +775,118 @@ fn janitor_apply(action_id: i64, state: State<AppState>) -> CmdResult<janitor::A
 #[tauri::command]
 fn janitor_dismiss(action_id: i64, state: State<AppState>) -> CmdResult<()> {
     with_vault(&state, |v| janitor::dismiss_action(v, action_id))
+}
+
+// ---------- skill: luật thường trực của người dùng ----------
+
+#[tauri::command]
+fn skills_list(state: State<AppState>) -> CmdResult<Vec<janitor::skills::Skill>> {
+    with_vault(&state, |v| janitor::skills::list(&v.root))
+}
+
+#[tauri::command]
+fn skills_save(
+    skill: janitor::skills::Skill,
+    state: State<AppState>,
+) -> CmdResult<janitor::skills::Skill> {
+    let now = now_secs();
+    with_vault(&state, |v| janitor::skills::save(&v.root, skill, now))
+}
+
+#[tauri::command]
+fn skills_delete(id: String, state: State<AppState>) -> CmdResult<()> {
+    with_vault(&state, |v| janitor::skills::delete(&v.root, &id))
+}
+
+/// Chạy skill ngay (nút "Chạy ngay" trong Settings). Chạy nền vì agent CLI có thể mất
+/// cả phút — xong thì bắn report như janitor.
+#[tauri::command]
+fn skills_run_now(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    let root = with_vault(&state, |v| Ok(v.root.clone()))?;
+    let pref = state.llm_pref.lock().map_err(err)?.clone();
+    spawn_skill_run(app, root, pref, true);
+    Ok(())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Một nhịp skill chạy trên Vault RIÊNG, không giữ lock của app trong lúc chờ
+/// agent CLI. `forced` = người dùng bấm chạy tay, bỏ qua mốc thời gian.
+fn spawn_skill_run(app: AppHandle, root: std::path::PathBuf, pref: String, forced: bool) {
+    use tauri::Emitter;
+    let Some(provider) = qa::provider_from_pref(&pref) else {
+        if forced {
+            let _ = app.emit(
+                "skill-run-done",
+                "Chưa có LLM nào chạy được (cài Claude Code hoặc Codex CLI)",
+            );
+        }
+        return;
+    };
+    std::thread::spawn(move || {
+        let Ok(mut vault) = Vault::open(&root) else { return };
+        match janitor::run_skills(&mut vault, provider) {
+            Ok(rows) => {
+                if !rows.is_empty() {
+                    if let Ok(Some(report)) = janitor::latest_report(&vault) {
+                        let _ = app.emit("janitor-report-ready", &report);
+                    }
+                }
+                if forced {
+                    let msg = if rows.is_empty() {
+                        "Skill đã chạy: không có gì cần làm".to_string()
+                    } else {
+                        format!("Skill đã chạy: {} việc — xem báo cáo janitor", rows.len())
+                    };
+                    let _ = app.emit("skill-run-done", msg);
+                }
+            }
+            Err(e) => {
+                if forced {
+                    let _ = app.emit("skill-run-done", format!("Skill lỗi: {e}"));
+                }
+            }
+        }
+    });
+}
+
+/// Heartbeat: cứ 5 phút ngó một cái, skill nào quá 1 giờ chưa chạy thì chạy.
+/// (Nhịp ngắn hơn chu kỳ để skill vừa thêm được chạy sớm, không phải chờ trọn 1 giờ.)
+fn spawn_skill_heartbeat(app: AppHandle) {
+    use tauri::Manager;
+    const TICK: Duration = Duration::from_secs(5 * 60);
+    const EVERY: i64 = 60 * 60;
+    // Mốc lần GỌI gần nhất, khác với last_run của skill: chạy lỗi (chưa cài CLI,
+    // agent timeout) thì skill không được mark_run — không có cái mốc này thì cứ
+    // 5 phút lại gọi agent một lần.
+    let mut last_attempt = 0i64;
+    std::thread::spawn(move || loop {
+        std::thread::sleep(TICK);
+        let now = now_secs();
+        if now - last_attempt < EVERY {
+            continue;
+        }
+        let state = app.state::<AppState>();
+        let root = {
+            let guard = match state.vault.lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let Some(v) = guard.as_ref() else { continue };
+            v.root.clone()
+        };
+        if !janitor::skills::due(&root, now, EVERY) {
+            continue;
+        }
+        last_attempt = now;
+        let pref = state.llm_pref.lock().map(|g| g.clone()).unwrap_or_default();
+        spawn_skill_run(app.clone(), root, pref, false);
+    });
 }
 
 /// Scheduler hằng đêm: kiểm tra mỗi 30 phút, chạy khi lần trước đã quá 24h.
@@ -965,6 +1108,10 @@ pub fn run() {
             janitor_latest,
             janitor_apply,
             janitor_dismiss,
+            skills_list,
+            skills_save,
+            skills_delete,
+            skills_run_now,
             graph_data,
             list_canvases,
             list_assets,
@@ -974,6 +1121,7 @@ pub fn run() {
         ])
         .setup(|app| {
             spawn_nightly_janitor(app.handle().clone());
+            spawn_skill_heartbeat(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
