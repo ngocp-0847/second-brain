@@ -296,38 +296,76 @@ fn chat_claude(
 /// Codex exec: không giữ session giữa các lần gọi — mỗi tin nhắn là một lượt độc lập.
 fn chat_codex(root: &std::path::Path, message: &str, context_path: Option<&str>) -> Result<AgentReply> {
     let prompt = format!("{}\n\n{message}", system_prompt(context_path));
-    let mut cmd = shell_command("codex", &["exec", "--full-auto", "-"]);
+    // Kết quả lấy qua file, KHÔNG qua stdout: codex exec đổ toàn bộ log lẫn câu
+    // trả lời ra stderr, stdout rỗng — lọc log bằng tay thì lúc được lúc không.
+    // PID thôi chưa đủ: heartbeat skill và chat có thể gọi codex cùng lúc trong
+    // cùng một tiến trình — hai lượt sẽ ghi đè file của nhau.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out_file = std::env::temp_dir()
+        .join(format!("second-brain-codex-{}-{seq}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out_file);
+    let out_arg = out_file.to_string_lossy().into_owned();
+    let mut cmd = shell_command(
+        "codex",
+        &[
+            "exec",
+            // --full-auto đã deprecated; đây là mức tương đương còn được nhận.
+            "--sandbox",
+            "workspace-write",
+            // Vault hiếm khi là git repo, mà không có cờ này codex từ chối chạy
+            // với đúng một dòng "Not inside a trusted directory".
+            "--skip-git-repo-check",
+            "-o",
+            &out_arg,
+            "-",
+        ],
+    );
     cmd.current_dir(root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("không chạy được codex — CLI có trên PATH không?")?;
     child.stdin.take().context("stdin không mở được")?.write_all(prompt.as_bytes())?;
 
+    // Phải vét cả hai pipe ở thread riêng: codex nói rất nhiều qua stderr, pipe
+    // đầy mà không ai đọc là tiến trình treo cho tới khi hết timeout.
     let mut stdout = child.stdout.take().context("stdout không mở được")?;
-    let reader = std::thread::spawn(move || {
+    let mut stderr = child.stderr.take().context("stderr không mở được")?;
+    let out_reader = std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = String::new();
         let _ = stdout.read_to_string(&mut buf);
         buf
     });
-    match child.wait_timeout(AGENT_TIMEOUT)? {
-        Some(status) if status.success() => {}
-        Some(status) => bail!("codex exit {status}"),
+    let err_reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
+
+    let status = match child.wait_timeout(AGENT_TIMEOUT)? {
+        Some(status) => status,
         None => {
             let _ = child.kill();
+            let _ = std::fs::remove_file(&out_file);
             bail!("agent không xong trong {} phút", AGENT_TIMEOUT.as_secs() / 60);
         }
+    };
+    let stdout_text = out_reader.join().unwrap_or_default();
+    let stderr_text = err_reader.join().unwrap_or_default();
+    let last = std::fs::read_to_string(&out_file).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_file);
+
+    if !status.success() {
+        bail!("codex thất bại: {}", qa::explain_codex_failure(&stderr_text));
     }
-    let out = reader.join().unwrap_or_default();
-    // codex exec in kèm log meta ('[...]', 'tokens used') — lọc thô.
-    let text = out
-        .trim()
-        .lines()
-        .filter(|l| !l.starts_with('[') && !l.to_lowercase().contains("tokens used"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
+    // Ưu tiên file -o; bản codex cũ không có cờ đó thì lọc stdout như trước.
+    let text = if !last.trim().is_empty() {
+        last.trim().to_string()
+    } else {
+        qa::clean_codex_output(&stdout_text)
+    };
     if text.is_empty() {
-        bail!("codex trả về rỗng");
+        bail!("codex chạy xong nhưng không trả về nội dung nào: {}", qa::explain_codex_failure(&stderr_text));
     }
     Ok(AgentReply { text, session_id: None, provider: "codex".into() })
 }

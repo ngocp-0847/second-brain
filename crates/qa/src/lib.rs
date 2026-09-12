@@ -191,7 +191,11 @@ pub fn generate(provider: Provider, prompt: &str) -> Result<String> {
         Provider::ClaudeCli => {
             shell_command("claude", &["-p", "--output-format", "text"])
         }
-        Provider::CodexCli => shell_command("codex", &["exec", "-"]),
+        // Thư mục tạm không phải git repo → thiếu --skip-git-repo-check là codex
+        // chết ngay với đúng một dòng "Not inside a trusted directory".
+        Provider::CodexCli => {
+            shell_command("codex", &["exec", "--sandbox", "read-only", "--skip-git-repo-check", "-"])
+        }
     };
     // Chạy trong thư mục tạm: agent không load CLAUDE.md / context của project nào.
     let workdir = std::env::temp_dir().join("second-brain-qa");
@@ -210,31 +214,44 @@ pub fn generate(provider: Provider, prompt: &str) -> Result<String> {
         .context("stdin không mở được")?
         .write_all(prompt.as_bytes())?;
 
-    // Đọc stdout ở thread riêng để tránh deadlock pipe đầy.
+    // Vét cả hai pipe ở thread riêng: codex nói rất nhiều qua stderr, pipe đầy
+    // mà không ai đọc là tiến trình treo cho tới khi hết timeout.
     let mut stdout = child.stdout.take().context("stdout không mở được")?;
+    let mut stderr = child.stderr.take().context("stderr không mở được")?;
     let reader = std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = String::new();
         let _ = stdout.read_to_string(&mut buf);
         buf
     });
+    let err_reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
 
-    match child.wait_timeout(LLM_TIMEOUT)? {
-        Some(status) if status.success() => {}
-        Some(status) => {
-            let mut err = String::new();
-            if let Some(mut se) = child.stderr.take() {
-                use std::io::Read;
-                let _ = se.read_to_string(&mut err);
+    // Giữ status từ wait_timeout: nó đã reap tiến trình rồi, try_wait sau đó
+    // trả None chứ không trả lại exit code.
+    let status = child.wait_timeout(LLM_TIMEOUT)?;
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    // Join SAU khi tiến trình kết thúc, và join cả hai trước khi bail — pipe
+    // còn treo thì thread đọc không bao giờ về.
+    let out = reader.join().unwrap_or_default();
+    let err = err_reader.join().unwrap_or_default();
+    let Some(status) = status else {
+        bail!("{} không trả lời trong {}s", provider.name(), LLM_TIMEOUT.as_secs());
+    };
+    if !status.success() {
+        match provider {
+            Provider::CodexCli => bail!("codex thất bại: {}", explain_codex_failure(&err)),
+            Provider::ClaudeCli => {
+                bail!("claude thất bại: {}", truncate_chars(err.trim(), 400))
             }
-            bail!("{} exit {}: {}", provider.name(), status, err.chars().take(500).collect::<String>());
-        }
-        None => {
-            let _ = child.kill();
-            bail!("{} không trả lời trong {}s", provider.name(), LLM_TIMEOUT.as_secs());
         }
     }
-    let out = reader.join().unwrap_or_default();
     let text = clean_output(&out, provider);
     if text.is_empty() {
         bail!("{} trả về rỗng", provider.name());
@@ -263,20 +280,57 @@ pub fn ask(db: &Db, question: &str) -> Result<Answer> {
 
 /// Codex exec in kèm log; giữ phần sau dòng trống cuối cùng của khối log đầu.
 fn clean_output(out: &str, provider: Provider) -> String {
-    let trimmed = out.trim();
     match provider {
-        Provider::ClaudeCli => trimmed.to_string(),
-        Provider::CodexCli => {
-            // codex exec: các dòng meta bắt đầu bằng '[' hoặc chứa "tokens used" — lọc thô.
-            trimmed
-                .lines()
-                .filter(|l| !l.starts_with('[') && !l.to_lowercase().contains("tokens used"))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        }
+        Provider::ClaudeCli => out.trim().to_string(),
+        Provider::CodexCli => clean_codex_output(out),
     }
+}
+
+/// Bỏ dòng log của `codex exec`, giữ lại phần câu trả lời.
+pub fn clean_codex_output(out: &str) -> String {
+    out.trim()
+        .lines()
+        .filter(|l| !l.starts_with('[') && !l.to_lowercase().contains("tokens used"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Vì sao `codex exec` chết, nói bằng tiếng người.
+///
+/// Codex đổ mọi thứ ra stderr và thoát với exit code 1 — in trần "exit code: 1"
+/// thì người dùng chẳng biết phải sửa gì. Bắt vài lỗi hay gặp thành lời khuyên
+/// cụ thể, còn lại thì trả về dòng ERROR/lỗi cuối cùng thay vì cả trang log.
+pub fn explain_codex_failure(stderr: &str) -> String {
+    let low = stderr.to_lowercase();
+    if low.contains("not inside a trusted directory") {
+        return "codex từ chối chạy ngoài git repo/thư mục tin cậy — bản codex này cần cờ \
+                --skip-git-repo-check (cài lại app để lấy bản đã sửa), hoặc chạy \
+                `codex` một lần trong thư mục vault để tin cậy nó"
+            .into();
+    }
+    if low.contains("requires a newer version of codex") {
+        return "model đang chọn cần bản codex mới hơn — chạy `npm i -g @openai/codex` \
+                để nâng cấp, hoặc đổi model trong ~/.codex/config.toml"
+            .into();
+    }
+    if low.contains("is not supported when using codex with a chatgpt account") {
+        return "model đang chọn không dùng được với tài khoản ChatGPT — đổi model \
+                trong ~/.codex/config.toml hoặc đăng nhập bằng API key"
+            .into();
+    }
+    if low.contains("not logged in") || low.contains("please run `codex login`") {
+        return "codex chưa đăng nhập — chạy `codex login` trong terminal".into();
+    }
+    // Dòng ERROR cuối là thứ sát nguyên nhân nhất; không có thì lấy dòng cuối.
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|l| l.contains("ERROR") || l.to_lowercase().contains("error"))
+        .or_else(|| stderr.lines().rev().find(|l| !l.trim().is_empty()))
+        .unwrap_or("không có thông tin lỗi");
+    truncate_chars(line.trim(), 400)
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -292,6 +346,43 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn giai_thich_loi_codex_hay_gap() {
+        // Lỗi hay gặp nhất: vault không phải git repo.
+        let e = explain_codex_failure(
+            "Not inside a trusted directory and --skip-git-repo-check was not specified.",
+        );
+        assert!(e.contains("skip-git-repo-check"), "{e}");
+
+        let e = explain_codex_failure(
+            r#"ERROR: {""message"":""The 'gpt-6-astra' model requires a newer version of Codex.""}"#,
+        );
+        assert!(e.contains("nâng cấp") || e.contains("npm i -g"), "{e}");
+
+        let e = explain_codex_failure(
+            "ERROR: The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.",
+        );
+        assert!(e.contains("ChatGPT"), "{e}");
+    }
+
+    #[test]
+    fn loi_la_thi_lay_dong_error_cuoi_cung() {
+        let log = "OpenAI Codex v0.145.0\nworkdir: D:\\\\vault\nERROR: quota exceeded\n";
+        let e = explain_codex_failure(log);
+        assert_eq!(e, "ERROR: quota exceeded");
+
+        // Không có dòng ERROR nào → lấy dòng cuối còn chữ, không trả rỗng.
+        let e = explain_codex_failure("dòng một\ndòng hai\n\n");
+        assert_eq!(e, "dòng hai");
+        assert!(!explain_codex_failure("").is_empty());
+    }
+
+    #[test]
+    fn loc_log_cua_codex_exec() {
+        let out = "[2026-09-12] meta\nCâu trả lời thật\ntokens used: 1234";
+        assert_eq!(clean_codex_output(out), "Câu trả lời thật");
+    }
 
     #[test]
     fn prompt_contains_citations_and_question() {
