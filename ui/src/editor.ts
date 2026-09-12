@@ -19,7 +19,13 @@ import {
 } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorState, Range, StateField } from "@codemirror/state";
+import {
+  Compartment,
+  EditorState,
+  Range,
+  StateEffect,
+  StateField,
+} from "@codemirror/state";
 import {
   Decoration,
   DecorationSet,
@@ -57,6 +63,8 @@ export interface EditorHandle {
   getContent(): string;
   /** Thay một khoảng bằng text mới rồi chọn lại kết quả — transaction nên Ctrl+Z hoàn tác được. */
   replaceRange(from: number, to: number, text: string): void;
+  /** Tên note hiện ở đầu trang (inline title); null = không hiện. */
+  setTitle(name: string | null): void;
   /** Lưu ngay nếu đang có thay đổi chưa flush. */
   flush(): void;
   /** Đổi theme sáng/tối: reconfigure cờ dark của CM và render lại diagram mermaid. */
@@ -73,6 +81,8 @@ interface EditorOpts {
   onSelection?: (sel: SelectionInfo | null) => void;
   /** Vừa lưu một ảnh dán vào vault — App nạp lại cây file cho ảnh hiện ra. */
   onAssetAdded?: (path: string) => void;
+  /** Đổi tên note từ inline title (Enter / rời ô). */
+  onRenameTitle?: (name: string) => void;
   /** Theme lúc khởi tạo; đổi sau bằng handle.setDark(). Mặc định dark. */
   dark?: boolean;
 }
@@ -600,6 +610,109 @@ const activeKey = (state: EditorState) =>
     .map((r) => `${state.doc.lineAt(r.from).number}-${state.doc.lineAt(r.to).number}`)
     .join(",");
 
+// ---- inline title: tên note hiện ngay đầu trang như Obsidian ----
+// Không nằm trong file .md — nó là tên FILE, vẽ thành widget ở đầu tài liệu.
+// Sửa tại chỗ rồi Enter = đổi tên note (App lo rewrite wikilink).
+
+/** Tên note đang mở; null = không hiện inline title (card canvas, chưa mở note). */
+const titleEffect = StateEffect.define<string | null>();
+
+const titleState = StateField.define<string | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(titleEffect)) return e.value;
+    return value;
+  },
+});
+
+class TitleWidget extends WidgetType {
+  constructor(
+    readonly name: string,
+    readonly onRename?: (name: string) => void,
+  ) {
+    super();
+  }
+
+  eq(other: TitleWidget) {
+    return other.name === this.name;
+  }
+
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = "cm-inline-title";
+    el.textContent = this.name;
+    if (!this.onRename) return el;
+
+    el.contentEditable = "true";
+    el.spellcheck = false;
+    const commit = () => {
+      const next = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+      // Xoá trắng rồi rời ô → trả lại tên cũ, đừng đổi tên file thành rỗng.
+      if (!next || next === this.name) {
+        el.textContent = this.name;
+        return;
+      }
+      this.onRename!(next);
+    };
+    el.addEventListener("keydown", (e) => {
+      // Title là MỘT dòng: Enter xác nhận rồi nhường focus cho nội dung.
+      if (e.key === "Enter") {
+        e.preventDefault();
+        el.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        el.textContent = this.name;
+        el.blur();
+      }
+    });
+    el.addEventListener("blur", commit);
+    // Dán từ web hay kéo chữ vào đây đều mang theo HTML — chỉ giữ phần chữ.
+    el.addEventListener("paste", (e) => {
+      e.preventDefault();
+      const text = e.clipboardData?.getData("text/plain")?.replace(/\s+/g, " ");
+      if (text) document.execCommand("insertText", false, text);
+    });
+    return el;
+  }
+
+  /** Widget tự lo mọi sự kiện — để CodeMirror xử lý thì gõ vào đây sẽ loạn. */
+  ignoreEvent() {
+    return true;
+  }
+
+  /** Ô này contentEditable nằm trong vùng soạn thảo của CodeMirror: gõ vào đây
+   *  sinh DOM mutation mà CM tưởng là nội dung đổi rồi dựng lại widget — chữ
+   *  vừa gõ biến mất. Bảo CM kệ mọi thay đổi bên trong. */
+  ignoreMutation() {
+    return true;
+  }
+}
+
+/** Widget nằm TRƯỚC dòng đầu (side < 0) nên không nuốt mất nội dung nào. */
+const titleDeco = (onRename?: (name: string) => void) => {
+  const build = (name: string | null) =>
+    name === null
+      ? Decoration.none
+      : Decoration.set([
+          Decoration.widget({
+            widget: new TitleWidget(name, onRename),
+            side: -1,
+            block: true,
+          }).range(0),
+        ]);
+  return StateField.define<DecorationSet>({
+    // setState dựng state mới với title đã seed — dựng decoration ngay ở đây,
+    // nếu chỉ làm trong update() thì đổi note xong title trống tới lần gõ đầu.
+    create: (state) => build(state.field(titleState)),
+    update(value, tr) {
+      const name = tr.state.field(titleState);
+      if (name === tr.startState.field(titleState)) return value.map(tr.changes);
+      return build(name);
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+};
+
 const blockPreview = StateField.define<BlockPreview>({
   create: buildBlocks,
   update(value, tr) {
@@ -721,6 +834,21 @@ const themeStyles = {
     padding: "1.2rem 0",
   },
   ".cm-content": { maxWidth: "46rem", margin: "0 auto", caretColor: "var(--fg)" },
+  // Cùng cỡ với H1 trong nội dung (mdHighlight heading1 = 1.7em) để tiêu đề
+  // trang và H1 đầu note không đá nhau về thị giác.
+  ".cm-inline-title": {
+    padding: "0 1.5rem",
+    margin: "0.2rem 0 0.6rem",
+    fontSize: "1.7em",
+    fontWeight: "700",
+    lineHeight: "1.25",
+    color: "var(--fg-strong)",
+    outline: "none",
+  },
+  ".cm-inline-title:empty::before": {
+    content: '"Không tên"',
+    color: "var(--fg-faint)",
+  },
   ".cm-line": { padding: "0 1.5rem" },
   "&.cm-focused": { outline: "none" },
   ".cm-cursor": { borderLeftColor: "var(--fg)" },
@@ -899,6 +1027,10 @@ export function createEditor(opts: EditorOpts): EditorHandle {
     state: EditorState.create({ doc: "" }),
   });
 
+  // Tên note của tab đang mở — setState dựng state MỚI nên phải seed lại,
+  // nếu không đổi note một cái là inline title biến mất.
+  let title: string | null = null;
+
   const makeState = (doc: string) =>
     EditorState.create({
       doc,
@@ -915,6 +1047,8 @@ export function createEditor(opts: EditorOpts): EditorHandle {
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         blockPreview,
         livePreview,
+        titleState.init(() => title),
+        titleDeco(opts.onRenameTitle),
         themeConf.of(makeTheme(dark)),
         autocompletion({ override: [wikiComplete], activateOnTyping: true }),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap, indentWithTab]),
@@ -1005,6 +1139,11 @@ export function createEditor(opts: EditorOpts): EditorHandle {
       });
       view.focus();
       flush();
+    },
+    setTitle(name) {
+      if (name === title) return;
+      title = name;
+      view.dispatch({ effects: titleEffect.of(name) });
     },
     flush,
     setDark(next) {
