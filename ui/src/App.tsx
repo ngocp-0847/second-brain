@@ -324,6 +324,39 @@ export default function App() {
   const sanitizeName = (s: string) =>
     s.replace(/[\\/:*?"<>|#^\[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
 
+  /** Sửa inline title ở đầu trang → đổi tên file (giữ thư mục, rewrite link).
+   *  Khác `renameToH1`: đây là thao tác cố ý của người dùng nên báo lỗi ra
+   *  status bar thay vì im lặng bỏ qua. */
+  const renameFromTitle = async (name: string) => {
+    const from = currentPath;
+    if (!from) return;
+    const clean = sanitizeName(name);
+    const stem = fileLabel(from);
+    if (!clean || clean === stem) {
+      editor.setTitle(stem); // dọn lại phần user vừa gõ vào widget
+      return;
+    }
+    const dir = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
+    const to = `${dir}${clean}.md`;
+    try {
+      editor.flush();
+      const n = await api.renameNote(from, to);
+      applyInfo(await api.refresh());
+      retargetTabs(from, to);
+      void retargetBookmark(from, to);
+      // Người dùng có thể đã đổi tab trong lúc chờ rename — đừng kéo họ về.
+      if (currentPath !== from) return;
+      currentPath = to;
+      setCurrent(to);
+      editor.setTitle(fileLabel(to));
+      loadPanels(to);
+      say(`Đã đổi tên, rewrite ${n} link trỏ tới`);
+    } catch (e) {
+      editor.setTitle(stem);
+      say(String(e));
+    }
+  };
+
   /** H1 đổi → đổi tên file theo (giữ thư mục, link trỏ tới tự rewrite). */
   const renameToH1 = async (h1: string) => {
     const from = currentPath;
@@ -345,6 +378,7 @@ export default function App() {
       if (currentPath !== from) return;
       currentPath = to;
       setCurrent(to);
+      editor.setTitle(fileLabel(to));
       loadPanels(to);
       say(`Tên file theo H1: ${clean}.md`);
     } catch {
@@ -570,6 +604,7 @@ export default function App() {
       setCurrent(path);
       setView("editor");
       editor.setContent(content);
+      editor.setTitle(fileLabel(path));
       loadPanels(path);
       updateTab(activeId(), { kind: "note", path });
       pushHist({ kind: "note", path });
@@ -612,6 +647,7 @@ export default function App() {
         setCurrent(t.path);
         setView("editor");
         editor.setContent(content);
+        editor.setTitle(fileLabel(t.path));
         loadPanels(t.path);
         return;
       } catch (e) {
@@ -619,6 +655,7 @@ export default function App() {
       }
     }
     setCurrent(null);
+    editor.setTitle(null);
     if (t.kind === "canvas" && t.path) {
       clearPanels();
       setCanvasPath(t.path);
@@ -1952,6 +1989,7 @@ export default function App() {
       },
       // Dán ảnh xong file mới nằm trong assets/ nhưng cây chưa biết — nạp lại.
       onAssetAdded: () => void reloadFiles(),
+      onRenameTitle: (name) => void renameFromTitle(name),
     });
 
     // Khôi phục phiên: đọc store rồi mở lại vault gần nhất (kèm tab + tree state).
