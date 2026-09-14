@@ -40,6 +40,17 @@ export {
   Pencil as IconRename,
   Trash2 as IconTrash,
   Undo2 as IconRestore,
+  EllipsisVertical as IconMore,
+  // Ba chế độ xem một note, đúng bộ của Obsidian.
+  BookOpen as IconReading,
+  CodeXml as IconSource,
+  SquareSplitHorizontal as IconSplitRight,
+  SquareSplitVertical as IconSplitDown,
+  TextSearch as IconFind,
+  Replace as IconReplace,
+  Printer as IconPdf,
+  TableProperties as IconProperty,
+  Merge as IconMerge,
   // ---- vùng chọn → AI ----
   Sparkles as IconAi,
   Send as IconSend,

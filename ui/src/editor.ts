@@ -18,10 +18,11 @@ import {
   syntaxTree,
 } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches, openSearchPanel, searchKeymap } from "@codemirror/search";
 import {
   Compartment,
   EditorState,
+  Facet,
   Range,
   StateEffect,
   StateField,
@@ -42,6 +43,12 @@ import {
 import { tags } from "@lezer/highlight";
 import type { NoteMeta } from "./api";
 import { imageFilesOf, isImagePath, resolveImageSrc, saveImageFile } from "./assets";
+
+/** Ba chế độ xem một note, đúng bộ của Obsidian:
+ *  - `live`   — Live Preview: cú pháp ẩn trừ dòng đang có con trỏ (mặc định)
+ *  - `source` — Source mode: markdown thô, không ẩn gì, không render khối
+ *  - `reading`— Reading view: render hết, không sửa được, không có con trỏ */
+export type EditorMode = "live" | "source" | "reading";
 
 /** Vùng chọn hiện tại + toạ độ màn hình để neo toolbar nổi ("Sửa bằng AI"). */
 export interface SelectionInfo {
@@ -69,6 +76,13 @@ export interface EditorHandle {
   flush(): void;
   /** Đổi theme sáng/tối: reconfigure cờ dark của CM và render lại diagram mermaid. */
   setDark(dark: boolean): void;
+  /** Live Preview ↔ Source mode ↔ Reading view. */
+  setMode(mode: EditorMode): void;
+  getMode(): EditorMode;
+  /** Mở panel tìm kiếm của CodeMirror; `replace` = nhảy thẳng vào ô thay thế. */
+  openFind(replace?: boolean): void;
+  /** Đưa con trỏ về editor (sau khi bấm menu, mở pane…). */
+  focus(): void;
   destroy(): void;
 }
 
@@ -85,6 +99,8 @@ interface EditorOpts {
   onRenameTitle?: (name: string) => void;
   /** Theme lúc khởi tạo; đổi sau bằng handle.setDark(). Mặc định dark. */
   dark?: boolean;
+  /** Chế độ xem lúc khởi tạo; đổi sau bằng handle.setMode(). Mặc định live. */
+  mode?: EditorMode;
 }
 
 const WIKILINK = /(!?)\[\[([^\[\]]+?)\]\]/g;
@@ -514,9 +530,17 @@ interface BlockPreview {
 
 const FENCE = /^\s*(`{3,}|~{3,})\s*(\S*)/;
 
-/** Tập dòng đang có con trỏ — khối chứa con trỏ phải hiện text thô để sửa. */
+/** Bật ở Reading view. Decoration hỏi facet này thay vì một biến module — mỗi
+ *  pane là một EditorState riêng nên chế độ phải nằm TRONG state. */
+const readingFacet = Facet.define<boolean, boolean>({
+  combine: (vs) => vs.length > 0 && vs[0],
+});
+
+/** Tập dòng đang có con trỏ — khối chứa con trỏ phải hiện text thô để sửa.
+ *  Reading view không sửa được nên coi như không dòng nào active: render sạch. */
 const activeLineSet = (state: EditorState) => {
   const set = new Set<number>();
+  if (state.facet(readingFacet)) return set;
   for (const r of state.selection.ranges) {
     const a = state.doc.lineAt(r.from).number;
     const b = state.doc.lineAt(r.to).number;
@@ -609,6 +633,10 @@ const activeKey = (state: EditorState) =>
   state.selection.ranges
     .map((r) => `${state.doc.lineAt(r.from).number}-${state.doc.lineAt(r.to).number}`)
     .join(",");
+
+/** activeKey + chế độ xem: đổi sang Reading view cũng phải vẽ lại decoration. */
+const stateKey = (state: EditorState) =>
+  `${state.facet(readingFacet) ? "r" : "e"}:${activeKey(state)}`;
 
 // ---- inline title: tên note hiện ngay đầu trang như Obsidian ----
 // Không nằm trong file .md — nó là tên FILE, vẽ thành widget ở đầu tài liệu.
@@ -718,7 +746,15 @@ const blockPreview = StateField.define<BlockPreview>({
   update(value, tr) {
     // Gõ trong cùng một dòng: selection đổi liên tục nhưng tập dòng active không
     // đổi → khối y hệt, khỏi quét lại cả tài liệu mỗi lần nhấn phím.
-    if (!tr.docChanged && activeKey(tr.startState) === activeKey(tr.state)) return value;
+    // Đổi sang/khỏi Reading view thì không có gì "đổi" theo nghĩa trên nhưng
+    // tập dòng active bị vô hiệu hoá → phải dựng lại, nếu không khối cạnh con
+    // trỏ vẫn kẹt ở dạng text thô.
+    if (
+      !tr.docChanged &&
+      activeKey(tr.startState) === activeKey(tr.state) &&
+      tr.startState.facet(readingFacet) === tr.state.facet(readingFacet)
+    )
+      return value;
     return buildBlocks(tr.state);
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
@@ -730,7 +766,8 @@ function buildLivePreview(view: EditorView): DecorationSet {
   const decos: Range<Decoration>[] = [];
   const state = view.state;
   const activeLines = activeLineSet(state);
-  const { spans } = state.field(blockPreview);
+  // Source mode gỡ blockPreview khỏi cấu hình → không có field để đọc.
+  const spans = state.field(blockPreview, false)?.spans ?? [];
   const inReplaced = (a: number, b: number) => spans.some((r) => a < r.to && b > r.from);
 
   for (const { from, to } of view.visibleRanges) {
@@ -790,13 +827,13 @@ const livePreview = ViewPlugin.fromClass(
     lastActive: string;
     constructor(view: EditorView) {
       this.decorations = buildLivePreview(view);
-      this.lastActive = activeKey(view.state);
+      this.lastActive = stateKey(view.state);
     }
     update(u: ViewUpdate) {
       // Gõ trong cùng một dòng thì selection đổi liên tục nhưng tập dòng active
       // không đổi → decoration y hệt. Bỏ qua để khỏi iterate lại syntaxTree mỗi
       // lần nhấn phím (rất tốn khi note có fenced block lớn).
-      const active = activeKey(u.view.state);
+      const active = stateKey(u.view.state);
       if (!u.docChanged && !u.viewportChanged && active === this.lastActive) return;
       this.lastActive = active;
       this.decorations = buildLivePreview(u.view);
@@ -955,16 +992,73 @@ const themeStyles = {
     border: "1px solid var(--border-card)",
   },
   ".cm-tooltip-autocomplete ul li[aria-selected]": { backgroundColor: "var(--selection)" },
+
+  // Panel Tìm/Thay thế (Ctrl+F, Ctrl+H). Style mặc định của CodeMirror là nền
+  // sáng cứng — phải phủ bằng token, nếu không theme tối nhìn như lỗi.
+  ".cm-panels": {
+    backgroundColor: "var(--bg-panel)",
+    color: "var(--fg)",
+    borderColor: "var(--border)",
+  },
+  ".cm-panels.cm-panels-bottom": { borderTop: "1px solid var(--border)" },
+  ".cm-panels.cm-panels-top": { borderBottom: "1px solid var(--border)" },
+  ".cm-panel.cm-search": { padding: "6px 8px", fontFamily: "inherit", fontSize: "12.5px" },
+  ".cm-panel.cm-search input, .cm-panel.cm-search button, .cm-panel.cm-search label": {
+    fontFamily: "inherit",
+    fontSize: "12.5px",
+  },
+  ".cm-panel.cm-search input[type=text]": {
+    backgroundColor: "var(--bg)",
+    color: "var(--fg)",
+    border: "1px solid var(--border-card)",
+    borderRadius: "4px",
+    padding: "3px 6px",
+  },
+  ".cm-panel.cm-search button:not([name=close])": {
+    backgroundColor: "var(--bg)",
+    backgroundImage: "none",
+    color: "var(--fg)",
+    border: "1px solid var(--border-card)",
+    borderRadius: "4px",
+    padding: "2px 8px",
+    cursor: "pointer",
+  },
+  ".cm-panel.cm-search button[name=close]": { color: "var(--fg-muted)", cursor: "pointer" },
+  ".cm-searchMatch": { backgroundColor: "var(--accent-bg)" },
+  ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "var(--accent-bg-hover)" },
+
+  // Reading view: không sửa được nên không có con trỏ, cũng không tô dòng hiện tại.
+  "&.cm-reading .cm-cursor, &.cm-reading .cm-cursorLayer": { display: "none" },
+  "&.cm-reading .cm-activeLine": { backgroundColor: "transparent" },
+  "&.cm-reading .cm-content": { caretColor: "transparent" },
 };
 
 const makeTheme = (dark: boolean) => EditorView.theme(themeStyles, { dark });
 const themeConf = new Compartment();
+const modeConf = new Compartment();
+
+/** Extension của từng chế độ xem. Đi qua Compartment nên đổi chế độ KHÔNG dựng
+ *  lại state — undo history và vị trí cuộn giữ nguyên. */
+const modeExts = (m: EditorMode) =>
+  m === "source"
+    ? []
+    : m === "reading"
+      ? [
+          blockPreview,
+          livePreview,
+          readingFacet.of(true),
+          EditorState.readOnly.of(true),
+          EditorView.editable.of(false),
+          EditorView.editorAttributes.of({ class: "cm-reading" }),
+        ]
+      : [blockPreview, livePreview];
 
 export function createEditor(opts: EditorOpts): EditorHandle {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let dirty = false;
   let suppress = false; // đang setContent, đừng autosave
   let dark = opts.dark ?? true;
+  let mode: EditorMode = opts.mode ?? "live";
   mermaidDark = dark; // trước khi mermaid được lazy-load lần đầu
 
   const flush = () => {
@@ -1045,8 +1139,7 @@ export function createEditor(opts: EditorOpts): EditorHandle {
         markdown({ base: markdownLanguage, codeLanguages: languages }),
         syntaxHighlighting(mdHighlight),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        blockPreview,
-        livePreview,
+        modeConf.of(modeExts(mode)),
         titleState.init(() => title),
         titleDeco(opts.onRenameTitle),
         themeConf.of(makeTheme(dark)),
@@ -1163,6 +1256,26 @@ export function createEditor(opts: EditorOpts): EditorHandle {
         suppress = false;
       }
     },
+    setMode(next) {
+      if (next === mode) return;
+      // Rời Reading view thì editor mới nhận được lệnh sửa lại — nhưng phải
+      // flush trước khi VÀO Reading view, chỗ khác không còn cách lưu.
+      if (next === "reading") flush();
+      mode = next;
+      view.dispatch({ effects: modeConf.reconfigure(modeExts(mode)) });
+    },
+    getMode: () => mode,
+    openFind(replace) {
+      openSearchPanel(view);
+      // Panel dựng xong ở cuối transaction; đợi một nhịp rồi mới trỏ vào ô.
+      queueMicrotask(() => {
+        const sel = replace ? 'input[name="replace"]' : 'input[name="search"]';
+        const input = view.dom.querySelector<HTMLInputElement>(sel);
+        input?.focus();
+        input?.select();
+      });
+    },
+    focus: () => view.focus(),
     destroy() {
       if (saveTimer) clearTimeout(saveTimer);
       if (onScroll) view.scrollDOM.removeEventListener("scroll", onScroll);
