@@ -26,7 +26,7 @@ import {
 } from "./api";
 import { CanvasView } from "./canvas";
 import { ChatPanel, type ChatSelection } from "./chat";
-import { createEditor, type EditorHandle, type SelectionInfo } from "./editor";
+import { createEditor, type EditorHandle, type EditorMode, type SelectionInfo } from "./editor";
 import { GraphView } from "./graph";
 import {
   IconAdd,
@@ -45,11 +45,15 @@ import {
   IconDark,
   IconDirArrow,
   IconDuplicate,
+  IconFind,
   IconForward,
   IconGraph,
   IconHistory,
   IconJanitor,
   IconLight,
+  IconLink,
+  IconMerge,
+  IconMore,
   IconMove,
   IconNewFolder,
   IconNewNote,
@@ -59,15 +63,22 @@ import {
   IconOpenNewTab,
   IconPanelClose,
   IconPanelOpen,
+  IconPdf,
   IconPin,
+  IconProperty,
+  IconReading,
   IconReindex,
   IconRename,
+  IconReplace,
   IconRestore,
   IconReveal,
   IconSearch,
   IconSend,
   IconSettings,
   IconShorten,
+  IconSource,
+  IconSplitDown,
+  IconSplitRight,
   IconSpell,
   IconSync,
   IconSystemTheme,
@@ -82,10 +93,13 @@ import {
   IconImage,
 } from "./icons";
 import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
+import { Crumbs, SplitPane } from "./pane";
+import { exportToPdf } from "./print";
 import { TermPanel } from "./terminal";
 import { DragGhost, setDirDropHandler } from "./dnd";
 import { parentDir, Tree, type TreeEditing, type TreeFile } from "./tree";
-import { isImagePath, resolveImageSrc } from "./assets";
+import { isImagePath } from "./assets";
+import { ImageView } from "./imageview";
 import {
   forgetVault,
   getBookmarks,
@@ -154,28 +168,6 @@ interface TabState {
   hi: number;
 }
 
-/** Tab xem ảnh: file trong vault không load thẳng vào WebView được nên phải
- *  đi qua backend (data-url). Chỉ để xem — sửa thì "Mở bằng app mặc định". */
-function ImageView(props: { path: string }) {
-  const [src, setSrc] = createSignal<string | null>(null);
-  const [err, setErr] = createSignal<string | null>(null);
-  createEffect(() => {
-    const p = props.path;
-    setSrc(null);
-    setErr(null);
-    resolveImageSrc(p)
-      .then(setSrc)
-      .catch((e) => setErr(`Không đọc được ảnh: ${e}`));
-  });
-  return (
-    <div class="image-view">
-      <Show when={src()} fallback={<div class="image-view-msg">{err() ?? "Đang mở ảnh…"}</div>}>
-        <img src={src()!} alt={props.path} />
-      </Show>
-    </div>
-  );
-}
-
 export default function App() {
   const [root, setRoot] = createSignal<string | null>(null);
   const [notes, setNotes] = createSignal<NoteMeta[]>([]);
@@ -224,6 +216,18 @@ export default function App() {
     hist: [{ kind: "empty", path: null }],
     hi: 0,
   });
+
+  // Chế độ xem của pane chính: Live Preview / Source mode / Reading view.
+  const [mode, setMode] = createSignal<EditorMode>("live");
+  // Pane phụ ("Split right/down"): mỗi lúc đúng một file, handle giữ để đồng bộ
+  // nội dung khi cùng một note mở ở cả hai bên.
+  const [splitPath, setSplitPath] = createSignal<string | null>(null);
+  const [splitDir, setSplitDir] = createSignal<"right" | "down">("right");
+  let splitEd: EditorHandle | null = null;
+  // Obsidian "Backlinks in document": danh sách backlink ngay dưới nội dung note.
+  const [docBacklinks, setDocBacklinks] = createSignal(
+    localStorage.getItem("docBacklinks") === "1",
+  );
 
   // Folder bị thu gọn trong tree + modal chuyển vault (🗂).
   const [closedDirs, setClosedDirs] = createSignal<Set<string>>(new Set());
@@ -426,7 +430,8 @@ export default function App() {
   };
 
   const openVaultAt = async (path: string) => {
-
+    // Pane phụ trỏ vào file của vault cũ — đóng trước khi đổi vault.
+    closeSplit();
     setVaultOpen(false);
     // Bật trước setRoot: nếu không, effect ghi workspace sẽ chạy ngay khi root()
     // đổi — với tab của vault CŨ — và đè mất bản đã lưu của vault mới.
@@ -822,12 +827,50 @@ export default function App() {
   );
 
   /** Note đổi path (rename) hoặc biến mất (to=null) → cập nhật mọi tab đang trỏ tới. */
-  const retargetTabs = (from: string, to: string | null) =>
+  const retargetTabs = (from: string, to: string | null) => {
     setTabs((ts) =>
       ts.map((t) =>
         t.path === from ? { ...t, path: to, kind: to ? t.kind : "empty" } : t,
       ),
     );
+    // Pane phụ không nằm trong bộ tab nên phải đổi/đóng riêng, nếu không nó giữ
+    // một path đã chết và lần lưu kế tiếp sẽ dựng lại file vừa xóa.
+    if (splitPath() === from) setSplitPath(to);
+  };
+
+  // ---- pane phụ: "Tách sang phải" / "Tách xuống dưới" ----
+
+  const openSplit = (path: string, dir: "right" | "down") => {
+    splitEd?.flush();
+    setSplitDir(dir);
+    setSplitPath(path);
+  };
+
+  const closeSplit = () => {
+    splitEd?.flush();
+    setSplitPath(null);
+  };
+
+  /** Lưu file của pane phụ. Cùng note mở ở hai pane → đẩy nội dung sang pane kia
+   *  (updateContent giữ undo history, không phải setContent). */
+  const saveSplit = async (path: string, content: string) => {
+    try {
+      applyInfo(await api.writeNoteWithInfo(path, content));
+      if (currentPath === path) editor.updateContent(content);
+      setStatus("Đã lưu ✓");
+      setTimeout(() => setStatus((s) => (s === "Đã lưu ✓" ? "" : s)), 1500);
+      schedulePanels(path);
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  /** Wikilink bấm trong pane phụ → mở ngay trong pane phụ, không cướp pane chính. */
+  const openInSplit = async (target: string) => {
+    const path = await api.resolveLink(target).catch(() => null);
+    if (path) setSplitPath(path);
+    else say(`Không tìm thấy note "${target}"`);
+  };
 
   /** Mở (hoặc tạo) daily note hôm nay: Daily/YYYY-MM-DD.md */
   const openDaily = async () => {
@@ -914,6 +957,8 @@ export default function App() {
       // write_note đã index và trả VaultInfo — trước đây còn gọi thêm refresh(),
       // tức là quét toàn vault hai lần cho mỗi lần autosave.
       applyInfo(await api.writeNoteWithInfo(currentPath, content));
+      // Cùng note đang mở ở pane phụ → đẩy sang cho hai bên không lệch nhau.
+      if (splitPath() === currentPath) splitEd?.updateContent(content);
       setStatus("Đã lưu ✓");
       setTimeout(() => setStatus((s) => (s === "Đã lưu ✓" ? "" : s)), 1500);
       schedulePanels(currentPath);
@@ -1015,31 +1060,6 @@ export default function App() {
     }
   };
 
-  const renameCurrent = () => {
-    const from = current();
-    if (!from) return;
-    setPromptCfg({
-      title: "Đường dẫn mới (link trỏ tới sẽ tự cập nhật)",
-      value: from,
-      onOk: async (to) => {
-        if (!to.trim() || to === from) return;
-        try {
-          editor.flush();
-          const n = await api.renameNote(from, to.trim());
-          applyInfo(await api.refresh());
-          const newPath = (to.trim().toLowerCase().endsWith(".md") ? to.trim() : to.trim() + ".md").replace(/\\/g, "/");
-          retargetTabs(from, newPath);
-          void retargetBookmark(from, newPath);
-          currentPath = null;
-          await openNote(newPath);
-          say(`Đã đổi tên, rewrite ${n} link trỏ tới`);
-        } catch (e) {
-          say(String(e));
-        }
-      },
-    });
-  };
-
   /** Hỏi trước khi làm, trừ khi user đã tick "Đừng hỏi lại". */
   const askConfirm = (
     cfg: { title: string; message: string; detail: string; confirmLabel: string },
@@ -1095,11 +1115,6 @@ export default function App() {
         }
       },
     );
-  };
-
-  const trashCurrent = () => {
-    const path = current();
-    if (path) trashNoteAt(path);
   };
 
   const trashFolderAt = (path: string) => {
@@ -1267,6 +1282,127 @@ export default function App() {
     },
   ];
 
+  // ---- chế độ xem: Live Preview ↔ Source mode ↔ Reading view ----
+
+  const applyMode = (m: EditorMode) => {
+    setMode(m);
+    editor.setMode(m);
+    editor.focus();
+  };
+  const toggleReading = () => applyMode(mode() === "reading" ? "live" : "reading");
+  const toggleSource = () => applyMode(mode() === "source" ? "live" : "source");
+
+  /** Ghi một note rồi đồng bộ vào mọi pane đang mở nó. Dùng cho các thao tác
+   *  sửa file "từ bên ngoài editor" (thêm property, gộp file). */
+  const writeAndSync = async (path: string, content: string) => {
+    applyInfo(await api.writeNoteWithInfo(path, content));
+    if (currentPath === path) editor.updateContent(content);
+    if (splitPath() === path) splitEd?.updateContent(content);
+    schedulePanels(path);
+  };
+
+  /** Nội dung mới nhất của một note: đang mở thì lấy trong editor (có thể còn
+   *  thay đổi chưa autosave), không thì đọc từ đĩa. */
+  const latestContent = async (path: string) => {
+    if (path !== currentPath) return api.readNote(path);
+    editor.flush();
+    return editor.getContent();
+  };
+
+  const exportPdf = async (path: string) => {
+    try {
+      await exportToPdf(fileLabel(path), await latestContent(path));
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  /** Chèn một dòng vào YAML frontmatter; chưa có frontmatter thì tạo mới ở đầu file. */
+  const withProperty = (content: string, entry: string) => {
+    if (content.startsWith("---\n")) {
+      const close = content.indexOf("\n---", 3);
+      if (close >= 0) return `${content.slice(0, close)}\n${entry}${content.slice(close)}`;
+    }
+    return `---\n${entry}\n---\n\n${content}`;
+  };
+
+  /** Obsidian "Add file property": một dòng `key: value` trong frontmatter. */
+  const addFileProperty = (path: string) =>
+    setPromptCfg({
+      title: "Thêm property — vd: tags: research, mcp",
+      value: "",
+      onOk: (raw) => {
+        const line = raw.trim();
+        if (!line) return;
+        const i = line.indexOf(":");
+        const key = (i >= 0 ? line.slice(0, i) : line).trim();
+        if (!key) return;
+        const value = i >= 0 ? line.slice(i + 1).trim() : "";
+        void (async () => {
+          try {
+            await writeAndSync(path, withProperty(await latestContent(path), `${key}: ${value}`));
+            say(`Đã thêm property "${key}"`);
+          } catch (e) {
+            say(String(e));
+          }
+        })();
+      },
+    });
+
+  /** Bỏ YAML frontmatter — nội dung gộp vào GIỮA file thì frontmatter chỉ là rác. */
+  const stripFrontmatter = (content: string) => {
+    if (!content.startsWith("---\n")) return content;
+    const close = content.indexOf("\n---", 3);
+    return close < 0 ? content : content.slice(close + 4).replace(/^\r?\n/, "");
+  };
+
+  /** Obsidian "Merge entire file with…": nối toàn bộ note này vào cuối note đích
+   *  rồi bỏ note này vào thùng rác. */
+  const mergeFileWith = (path: string) =>
+    openNotePicker((target) => {
+      if (target === path) return say("Không gộp một note vào chính nó");
+      askConfirm(
+        {
+          title: "Gộp file",
+          message: `Nối toàn bộ "${fileLabel(path)}" vào cuối "${fileLabel(target)}"?`,
+          detail:
+            "Note nguồn sẽ vào thùng rác sau khi gộp. Wikilink đang trỏ tới nó KHÔNG được sửa lại — kiểm tra link gãy sau khi gộp.",
+          confirmLabel: "Gộp",
+        },
+        () => void doMerge(path, target),
+      );
+    });
+
+  const doMerge = async (path: string, target: string) => {
+    try {
+      const src = stripFrontmatter(await latestContent(path)).trim();
+      const dst = await api.readNote(target);
+      await writeAndSync(target, `${dst.replace(/\s+$/, "")}\n\n${src}\n`);
+      await api.trashNote(path);
+      retargetTabs(path, null);
+      void dropBookmark(path);
+      applyInfo(await api.refresh());
+      await openNote(target);
+      say(`Đã gộp vào "${fileLabel(target)}" — bản cũ nằm trong thùng rác`);
+    } catch (e) {
+      say(String(e));
+    }
+  };
+
+  /** Obsidian "Open linked view": mở panel phải và cuộn tới đúng mục. */
+  const showLinkedView = (panel: "backlinks" | "mentions" | "related") => {
+    if (!rightOpen()) toggleRight();
+    setTimeout(() => {
+      document.querySelector(`[data-panel="${panel}"]`)?.scrollIntoView({ block: "start" });
+    }, 0);
+  };
+
+  const toggleDocBacklinks = () => {
+    const v = !docBacklinks();
+    setDocBacklinks(v);
+    localStorage.setItem("docBacklinks", v ? "1" : "0");
+  };
+
   /** Di chuyển file sang folder khác ("" = gốc vault). Note đi qua `renameNote`
    *  để wikilink được rewrite; canvas không nằm trong link graph nên `renameFile`. */
   const doMoveFile = async (path: string, dir: string) => {
@@ -1354,9 +1490,24 @@ export default function App() {
     { label: "Xóa", icon: IconTrash, danger: true, onSelect: () => trashNoteAt(path) },
   ];
 
+  /** Hai mục tách pane — dùng ở cả menu sidebar lẫn menu ⋮ trên note header. */
+  const splitItems = (path: string): MenuItem[] => [
+    {
+      label: "Tách sang phải",
+      icon: IconSplitRight,
+      onSelect: () => openSplit(path, "right"),
+    },
+    {
+      label: "Tách xuống dưới",
+      icon: IconSplitDown,
+      onSelect: () => openSplit(path, "down"),
+    },
+  ];
+
   /** Menu cho một file trong vault — dùng chung cho note và canvas trong sidebar. */
   const fileMenu = (path: string): MenuItem[] => [
     { label: "Mở trong tab mới", icon: IconOpenNewTab, onSelect: () => void openInNewTab(path) },
+    ...splitItems(path),
     {
       label: "Mở trong cửa sổ mới",
       icon: IconNewWindow,
@@ -1365,6 +1516,99 @@ export default function App() {
     { separator: true, label: "" },
     ...fileActions(path),
   ];
+
+  /** Menu ⋮ trên note header — bản clone của "more options" trong Obsidian.
+   *  `inSplit`: menu của pane phụ, bỏ những mục chỉ có nghĩa với pane chính. */
+  const noteMenu = (path: string, inSplit = false): MenuItem[] => {
+    const items: MenuItem[] = [];
+    if (!inSplit) {
+      items.push(
+        {
+          label: "Backlinks trong tài liệu",
+          icon: IconLink,
+          shortcut: docBacklinks() ? "✓" : "",
+          onSelect: toggleDocBacklinks,
+        },
+        {
+          label: "Reading view",
+          icon: IconReading,
+          shortcut: mode() === "reading" ? "✓" : "",
+          onSelect: toggleReading,
+        },
+        {
+          label: "Source mode",
+          icon: IconSource,
+          shortcut: mode() === "source" ? "✓" : "",
+          onSelect: toggleSource,
+        },
+        { separator: true, label: "" },
+        ...splitItems(path),
+        {
+          label: "Mở trong cửa sổ mới",
+          icon: IconNewWindow,
+          onSelect: () => void api.openNoteWindow(path).catch((e) => say(String(e))),
+        },
+        { separator: true, label: "" },
+      );
+    }
+    items.push(
+      { label: "Đổi tên…", icon: IconRename, onSelect: () => renameFileAt(path) },
+      { label: "Di chuyển tới…", icon: IconMove, onSelect: () => moveFileTo(path) },
+      isBookmarked(path)
+        ? { label: "Bỏ bookmark", icon: IconUnbookmark, onSelect: () => void dropBookmark(path) }
+        : { label: "Bookmark…", icon: IconBookmark, onSelect: () => addBookmark(path) },
+      { label: "Gộp toàn bộ file với…", icon: IconMerge, onSelect: () => mergeFileWith(path) },
+      { label: "Thêm property", icon: IconProperty, onSelect: () => addFileProperty(path) },
+      { label: "Xuất ra PDF…", icon: IconPdf, onSelect: () => void exportPdf(path) },
+      { separator: true, label: "" },
+      {
+        label: "Tìm…",
+        icon: IconFind,
+        shortcut: "Ctrl+F",
+        onSelect: () => (inSplit ? splitEd : editor)?.openFind(),
+      },
+      {
+        label: "Thay thế…",
+        icon: IconReplace,
+        shortcut: "Ctrl+H",
+        onSelect: () => (inSplit ? splitEd : editor)?.openFind(true),
+      },
+      { separator: true, label: "" },
+      copyPathItem(path),
+      { label: "Lịch sử phiên bản", icon: IconHistory, onSelect: () => void openHistoryFor(path) },
+    );
+    if (!inSplit) {
+      items.push({
+        label: "Mở panel liên kết",
+        icon: IconTree,
+        submenu: [
+          {
+            label: `Backlinks (${backlinks().length})`,
+            onSelect: () => showLinkedView("backlinks"),
+          },
+          {
+            label: `Nhắc tới chưa link (${mentions().length})`,
+            onSelect: () => showLinkedView("mentions"),
+          },
+          { label: `Liên quan (${related().length})`, onSelect: () => showLinkedView("related") },
+        ],
+      });
+    }
+    items.push(
+      { separator: true, label: "" },
+      ...osItems(path),
+      { label: "Hiện trong sidebar", icon: IconTree, onSelect: () => revealInTree(path) },
+      { separator: true, label: "" },
+      { label: "Xóa", icon: IconTrash, danger: true, onSelect: () => trashNoteAt(path) },
+    );
+    return items;
+  };
+
+  /** Neo menu vào nút vừa bấm (mép dưới-phải), không phải toạ độ con trỏ. */
+  const openMenuAt = (e: MouseEvent, items: MenuItem[]) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setCtxMenu({ x: r.right, y: r.bottom + 4, items });
+  };
 
   /** Bung mọi folder cha rồi cuộn tới note trong sidebar ("Reveal file in navigation").
    *  `soft`: chỉ cuộn khi dòng đang khuất — dùng cho auto-reveal, cuộn vô cớ làm
@@ -1388,6 +1632,21 @@ export default function App() {
         if (a.top >= b.top && a.bottom <= b.bottom) return; // đã nhìn thấy
       }
       el.scrollIntoView({ block: "center" });
+    }, 0);
+  };
+
+  /** Bung và cuộn tới một FOLDER trong sidebar — dùng khi bấm một chặng breadcrumb. */
+  const revealDirInTree = (dir: string) => {
+    const parts = dir.split("/");
+    setClosedDirs((s) => {
+      const next = new Set(s);
+      for (let i = 0; i < parts.length; i++) next.delete(parts.slice(0, i + 1).join("/"));
+      return next;
+    });
+    setTimeout(() => {
+      document
+        .querySelector(`.tree-dir[data-dir="${CSS.escape(dir)}"]`)
+        ?.scrollIntoView({ block: "center" });
     }, 0);
   };
 
@@ -1420,6 +1679,7 @@ export default function App() {
         onSelect: () => void api.openNoteWindow(t.path!).catch((e) => say(String(e))),
       },
       { label: "Hiện trong sidebar", icon: IconTree, onSelect: () => revealInTree(t.path!) },
+      ...splitItems(t.path),
       { separator: true, label: "" },
       ...fileActions(t.path),
     );
@@ -1626,10 +1886,16 @@ export default function App() {
     } catch (e) {
       say(String(e));
     }
+    const sp = splitPath();
+    if (sp && paths.includes(sp) && sp !== currentPath) {
+      await api.readNote(sp).then((c) => splitEd?.updateContent(c)).catch(() => {});
+    }
     const p = currentPath;
     if (!p || !paths.includes(p)) return;
     try {
-      editor.updateContent(await api.readNote(p));
+      const content = await api.readNote(p);
+      editor.updateContent(content);
+      if (sp === p) splitEd?.updateContent(content);
       loadPanels(p);
     } catch {
       // note vừa bị xoá/đổi tên bên ngoài — tab sẽ được dọn ở nhịp refresh kế tiếp
@@ -1647,8 +1913,10 @@ export default function App() {
   };
 
   /** Chỉ hiện khi đang xem note: nút nổi khi popover đóng, popover khi mở. */
-  const fabSel = () => (view() === "editor" && current() && !aiOpen() ? sel() : null);
-  const popSel = () => (view() === "editor" && current() && aiOpen() ? sel() : null);
+  // Reading view không sửa được nên cũng không cho "Sửa bằng AI" thay vào đó.
+  const canEditSel = () => view() === "editor" && !!current() && mode() !== "reading";
+  const fabSel = () => (canEditSel() && !aiOpen() ? sel() : null);
+  const popSel = () => (canEditSel() && aiOpen() ? sel() : null);
 
   const openAi = () => {
     if (!sel()) return;
@@ -2084,6 +2352,19 @@ export default function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w") {
         e.preventDefault();
         if (!activeTab()?.pinned) closeTab(activeId());
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e") {
+        // Obsidian: Ctrl+E lật giữa chế độ sửa và Reading view.
+        if (view() !== "editor" || !current()) return;
+        e.preventDefault();
+        toggleReading();
+      } else if ((e.ctrlKey || e.metaKey) && ["f", "h"].includes(e.key.toLowerCase())) {
+        // CodeMirror đã bắt Ctrl+F khi con trỏ trong editor; nhánh này để bấm từ
+        // chỗ khác (vừa bấm menu, vừa click sidebar…) vẫn mở được panel tìm.
+        const el = document.activeElement;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
+        if (view() !== "editor" || !current()) return;
+        e.preventDefault();
+        editor.openFind(e.key.toLowerCase() === "h");
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "l") {
         e.preventDefault();
         openAi();
@@ -2252,94 +2533,158 @@ export default function App() {
             {rightOpen() ? <IconPanelClose /> : <IconPanelOpen />}
           </button>
         </div>
-        <div class="note-header">
-          <button
-            class="nav-btn"
-            title="Quay lại (Alt+←)"
-            disabled={!canBack()}
-            onClick={() => void go(-1)}
-          >
-            <IconBack />
-          </button>
-          <button
-            class="nav-btn"
-            title="Đi tới (Alt+→)"
-            disabled={!canForward()}
-            onClick={() => void go(1)}
-          >
-            <IconForward />
-          </button>
-          <span class="note-path">
+        <div class="panes" classList={{ down: splitDir() === "down" }}>
+          <div class="pane">
+            <div class="note-header">
+              <button
+                class="nav-btn"
+                title="Quay lại (Alt+←)"
+                disabled={!canBack()}
+                onClick={() => void go(-1)}
+              >
+                <IconBack />
+              </button>
+              <button
+                class="nav-btn"
+                title="Đi tới (Alt+→)"
+                disabled={!canForward()}
+                onClick={() => void go(1)}
+              >
+                <IconForward />
+              </button>
+              <span class="note-path">
+                <Show when={view() === "graph"}>
+                  <IconGraph />
+                </Show>
+                <Show when={view() === "canvas"}>
+                  <IconCanvas />
+                </Show>
+                <Show when={view() === "image"}>
+                  <IconImage />
+                </Show>
+                <Show
+                  when={activePath() && view() !== "graph"}
+                  fallback={view() === "graph" ? "Graph view" : ""}
+                >
+                  {/* Breadcrumb kiểu Obsidian: bấm thư mục để nhảy tới nó trong sidebar. */}
+                  <Crumbs
+                    path={activePath()!}
+                    onOpenDir={(d) => revealDirInTree(d)}
+                    onOpenFile={() => revealInTree(activePath()!)}
+                  />
+                </Show>
+              </span>
+              <Show when={view() === "editor" && current()}>
+                <button
+                  title={mode() === "reading" ? "Về chế độ sửa (Ctrl+E)" : "Reading view (Ctrl+E)"}
+                  classList={{ active: mode() === "reading" }}
+                  onClick={toggleReading}
+                >
+                  {mode() === "reading" ? <IconSource /> : <IconReading />}
+                </button>
+                <button title="Lịch sử phiên bản (mọi thay đổi của bạn & AI)" onClick={openHistory}><IconHistory /></button>
+                <button
+                  title="Thêm hành động"
+                  onClick={(e) => openMenuAt(e, noteMenu(current()!))}
+                >
+                  <IconMore />
+                </button>
+              </Show>
+              <Show when={view() === "image" && imagePath()}>
+                <button title="Đổi tên / di chuyển" onClick={() => moveFileTo(imagePath()!)}><IconRename /></button>
+                <button
+                  title="Thêm hành động"
+                  onClick={(e) => openMenuAt(e, fileMenu(imagePath()!))}
+                >
+                  <IconMore />
+                </button>
+              </Show>
+              <Show when={view() === "canvas" && canvasPath()}>
+                <button
+                  title="Thêm hành động"
+                  onClick={(e) => openMenuAt(e, fileMenu(canvasPath()!))}
+                >
+                  <IconMore />
+                </button>
+              </Show>
+            </div>
+            <div
+              class="editor-host"
+              ref={editorHost}
+              style={{ display: view() === "editor" && current() ? "block" : "none" }}
+            />
+            <Show when={view() === "editor" && !current()}>
+              <div class="empty-state">
+                <h2>Second Brain</h2>
+                <p>
+                  {root()
+                    ? "Chọn note bên trái, hoặc Ctrl+K để tìm / tạo."
+                    : "Mở một vault (thư mục chứa file .md) để bắt đầu."}
+                </p>
+                <Show when={!root()}>
+                  <Show when={recentVaults().length > 0}>
+                    <div class="recent-title">Vault gần đây</div>
+                    <VaultList />
+                  </Show>
+                  <button class="vault-browse" onClick={pickVault}>
+                    Chọn thư mục khác…
+                  </button>
+                </Show>
+                <p class="hint">
+                  Ctrl+K tìm/tạo · ? hỏi đáp · Ctrl+G graph · daily note · [[ autocomplete · Ctrl+Click mở link
+                </p>
+              </div>
+            </Show>
             <Show when={view() === "graph"}>
-              <IconGraph />
+              <GraphView onOpen={openNote} />
             </Show>
-            <Show when={view() === "canvas"}>
-              <IconCanvas />
+            <Show when={view() === "image" && imagePath()} keyed>
+              {(p) => <ImageView path={p as string} />}
             </Show>
-            <Show when={view() === "image"}>
-              <IconImage />
+            <Show when={view() === "canvas" && canvasPath()} keyed>
+              {(p) => (
+                <CanvasView
+                  path={p as string}
+                  getNotes={notes}
+                  onOpenNote={openNote}
+                  requestNotePick={openNotePicker}
+                />
+              )}
             </Show>
-            {view() === "graph"
-              ? "Graph view"
-              : view() === "canvas"
-                ? canvasPath() ?? ""
-                : view() === "image"
-                  ? imagePath() ?? ""
-                  : current() ?? ""}
-          </span>
-          <Show when={view() === "editor" && current()}>
-            <button title="Lịch sử phiên bản (mọi thay đổi của bạn & AI)" onClick={openHistory}><IconHistory /></button>
-            <button title="Đổi tên / di chuyển" onClick={renameCurrent}><IconRename /></button>
-            <button title="Chuyển vào thùng rác" onClick={trashCurrent}><IconTrash /></button>
-          </Show>
-          <Show when={view() === "image" && imagePath()}>
-            <button title="Đổi tên / di chuyển" onClick={() => moveFileTo(imagePath()!)}><IconRename /></button>
-            <button title="Chuyển vào thùng rác" onClick={() => trashNoteAt(imagePath()!)}><IconTrash /></button>
+            {/* Obsidian "Backlinks in document": danh sách backlink ngay dưới nội dung note. */}
+            <Show when={view() === "editor" && current() && docBacklinks()}>
+              <div class="doc-backlinks">
+                <div class="doc-backlinks-head">Backlinks ({backlinks().length})</div>
+                <Show when={backlinks().length === 0}>
+                  <div class="tree-empty">Chưa có note nào link tới đây</div>
+                </Show>
+                <For each={backlinks()}>
+                  {(b) => (
+                    <div class="backlink" onClick={() => openNote(b.src_path)} title={b.src_path}>
+                      <div class="backlink-title">{b.src_title}</div>
+                      <div class="backlink-path">{b.src_path}</div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+
+          <Show when={splitPath()}>
+            <SplitPane
+              path={splitPath()!}
+              dir={splitDir()}
+              dark={isDark()}
+              getNotes={notes}
+              onSave={(p, c) => void saveSplit(p, c)}
+              onOpenLink={(t) => void openInSplit(t)}
+              onMenu={(e, p) => openMenuAt(e, noteMenu(p, true))}
+              onOpenDir={(d) => revealDirInTree(d)}
+              onClose={closeSplit}
+              onReady={(h) => (splitEd = h)}
+            />
           </Show>
         </div>
-        <div
-          class="editor-host"
-          ref={editorHost}
-          style={{ display: view() === "editor" && current() ? "block" : "none" }}
-        />
-        <Show when={view() === "editor" && !current()}>
-          <div class="empty-state">
-            <h2>Second Brain</h2>
-            <p>
-              {root()
-                ? "Chọn note bên trái, hoặc Ctrl+K để tìm / tạo."
-                : "Mở một vault (thư mục chứa file .md) để bắt đầu."}
-            </p>
-            <Show when={!root()}>
-              <Show when={recentVaults().length > 0}>
-                <div class="recent-title">Vault gần đây</div>
-                <VaultList />
-              </Show>
-              <button class="vault-browse" onClick={pickVault}>
-                Chọn thư mục khác…
-              </button>
-            </Show>
-            <p class="hint">
-              Ctrl+K tìm/tạo · ? hỏi đáp · Ctrl+G graph · daily note · [[ autocomplete · Ctrl+Click mở link
-            </p>
-          </div>
-        </Show>
-        <Show when={view() === "graph"}>
-          <GraphView onOpen={openNote} />
-        </Show>
-        <Show when={view() === "image" && imagePath()} keyed>
-          {(p) => <ImageView path={p as string} />}
-        </Show>
-        <Show when={view() === "canvas" && canvasPath()} keyed>
-          {(p) => (
-            <CanvasView
-              path={p as string}
-              getNotes={notes}
-              onOpenNote={openNote}
-              requestNotePick={openNotePicker}
-            />
-          )}
-        </Show>
         <TermPanel visible={termVisible()} onClose={() => setTermVisible(false)} />
         <Show when={settingsOpen()}>
           <div class="settings-page">
@@ -2664,7 +3009,7 @@ export default function App() {
       </main>
 
       <aside class="rightbar">
-        <div class="panel-title">
+        <div class="panel-title" data-panel="backlinks">
           {view() === "image" ? "Dùng trong" : "Backlinks"} ({backlinks().length})
         </div>
         <For each={backlinks()}>
@@ -2684,7 +3029,7 @@ export default function App() {
         </Show>
 
         <Show when={mentions().length > 0}>
-          <div class="panel-title">Nhắc tới chưa link ({mentions().length})</div>
+          <div class="panel-title" data-panel="mentions">Nhắc tới chưa link ({mentions().length})</div>
           <For each={mentions()}>
             {(m) => (
               <div class="backlink" onClick={() => openNote(m.path)} title={m.path}>
@@ -2696,7 +3041,7 @@ export default function App() {
         </Show>
 
         <Show when={related().length > 0}>
-          <div class="panel-title">Liên quan</div>
+          <div class="panel-title" data-panel="related">Liên quan</div>
           <For each={related()}>
             {(r) => (
               <div class="backlink" onClick={() => openNote(r.path)} title={r.path}>

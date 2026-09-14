@@ -3177,3 +3177,255 @@ details[open] > .tree-dir .tree-dir-arrow {
   width: 20px;
   height: 20px;
 }
+
+/* ---- pane: "Split right" / "Split down" (Obsidian) ----
+ * Pane chính giữ tab bar; pane phụ chỉ xem đúng một file nên có header riêng
+ * rút gọn. Cả hai chia đôi chiều ngang (right) hoặc chiều dọc (down). */
+.panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panes.down {
+  flex-direction: column;
+}
+
+.pane {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane-split {
+  border-left: 1px solid var(--border);
+}
+
+.pane-split.down {
+  border-left: none;
+  border-top: 1px solid var(--border);
+}
+
+.pane-msg {
+  padding: var(--sp-lg);
+  color: var(--fg-muted);
+}
+
+/* Nút chế độ đang bật (Reading view) trên note header */
+.note-header button.active {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+
+/* ---- breadcrumb đường dẫn note ---- */
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.crumb {
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: 1px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crumb:hover {
+  background: var(--hover);
+  color: var(--fg-strong);
+}
+
+.crumb.last {
+  color: var(--fg-strong);
+  font-weight: 600;
+  flex-shrink: 1;
+}
+
+.crumb-sep {
+  color: var(--fg-faint);
+  flex-shrink: 0;
+}
+
+/* ---- "Backlinks in document": khối backlink ngay dưới nội dung note ---- */
+.doc-backlinks {
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow-y: auto;
+  padding: var(--sp-sm) var(--sp-md) var(--sp-md);
+  border-top: 1px solid var(--border);
+  background: var(--bg-side);
+}
+
+.doc-backlinks-head {
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: var(--sp-xs);
+}
+
+/* ---- Export to PDF ----
+ * Trang in được dựng thành một cây DOM riêng (.print-root). Khi in thì giấu
+ * toàn bộ app và chỉ chừa cây đó lại — in thẳng editor sẽ mất phần chưa cuộn
+ * tới vì CodeMirror chỉ render viewport. */
+.print-root {
+  display: none;
+}
+
+body.printing > *:not(.print-root) {
+  display: none !important;
+}
+
+body.printing {
+  overflow: auto;
+  /* Nền app tối vẫn vẽ sau .print-root — đặt trắng cho khớp giấy. */
+  background: #fff;
+}
+
+body.printing .print-root {
+  display: block;
+  background: #fff;
+  color: #000;
+  padding: 24px;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+.print-root .pr-title {
+  font-size: 26px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 8px;
+}
+
+.print-root .pr-h {
+  margin: 18px 0 8px;
+  line-height: 1.3;
+}
+
+.print-root .pr-p,
+.print-root .pr-list,
+.print-root .pr-quote,
+.print-root .pr-callout,
+.print-root .pr-table,
+.print-root .pr-props,
+.print-root .pr-figure {
+  margin: 0 0 10px;
+}
+
+.print-root .pr-p {
+  white-space: pre-wrap;
+}
+
+.print-root .pr-list {
+  padding-left: 22px;
+}
+
+.print-root .pr-task {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.print-root .pr-task input {
+  margin-right: 6px;
+}
+
+.print-root .pr-code {
+  background: #f4f4f6;
+  border: 1px solid #e0e0e6;
+  border-radius: 4px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+
+.print-root code {
+  background: #f4f4f6;
+  border-radius: 3px;
+  padding: 0 3px;
+  font-family: Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.print-root .pr-quote,
+.print-root .pr-callout {
+  border-left: 3px solid #bbb;
+  padding: 4px 0 4px 12px;
+  color: #444;
+}
+
+.print-root .pr-callout-title {
+  font-weight: 700;
+  color: #222;
+}
+
+.print-root .pr-table,
+.print-root .pr-props {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.print-root .pr-table th,
+.print-root .pr-table td,
+.print-root .pr-props th,
+.print-root .pr-props td {
+  border: 1px solid #ccc;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.print-root .pr-props {
+  background: #fafafc;
+  font-size: 12.5px;
+}
+
+.print-root .pr-props th {
+  width: 22%;
+  color: #555;
+}
+
+.print-root .pr-img {
+  max-width: 100%;
+}
+
+.print-root .pr-img-error {
+  color: #a33;
+  font-size: 12px;
+}
+
+.print-root .pr-wiki {
+  color: #3b5bdb;
+}
+
+.print-root .pr-hr {
+  border: none;
+  border-top: 1px solid #ddd;
+}
+
+@media print {
+  @page {
+    margin: 14mm;
+  }
+
+  body.printing .print-root {
+    padding: 0;
+  }
+
+  .print-root .pr-h,
+  .print-root .pr-figure,
+  .print-root .pr-table {
+    break-inside: avoid;
+  }
+}

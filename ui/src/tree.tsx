@@ -127,6 +127,8 @@ function Dir(props: DirProps) {
           >
             <summary
               class="tree-dir"
+              // Cho "bấm breadcrumb → nhảy tới folder" tìm được đúng dòng.
+              data-dir={d.path}
               classList={{ "drop-target": dropDir() === d.path }}
               onContextMenu={(e) => {
                 e.preventDefault();
