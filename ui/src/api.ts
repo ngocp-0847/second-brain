@@ -50,9 +50,10 @@ export const api = {
   readNote: (path: string) => invoke<string>("read_note", { path }),
   writeNote: (path: string, content: string) =>
     invoke<null>("write_note", { path, content, withInfo: false }),
-  /** Lưu rồi trả luôn VaultInfo đã index — khỏi gọi refresh() thêm một lượt. */
+  /** Lưu + index đúng file đó. Trả VaultInfo khi overview đổi (note mới, title,
+   *  link); chỉ sửa chữ trong thân note thì trả null — giữ nguyên state cũ. */
   writeNoteWithInfo: (path: string, content: string) =>
-    invoke<VaultInfo>("write_note", { path, content, withInfo: true }),
+    invoke<VaultInfo | null>("write_note", { path, content, withInfo: true }),
   createNote: (path: string) => invoke<string>("create_note", { path }),
   createFolder: (path: string) => invoke<string>("create_folder", { path }),
   renameFolder: (from: string, to: string) =>

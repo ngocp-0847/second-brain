@@ -363,7 +363,7 @@ pub(crate) fn call(s: &mut Server, name: &str, a: &Value) -> Result<Value, ToolE
             // vào nội dung là thấy tên hai lần.
             let content = opt_str(a, "content").map(String::from).unwrap_or_default();
             write_file(&abs, &content)?;
-            s.vault.index()?;
+            s.vault.index_file(&rel)?;
             json!({ "path": rel, "created": true, "bytes": content.len() })
         }
         "write_note" => {
@@ -371,7 +371,10 @@ pub(crate) fn call(s: &mut Server, name: &str, a: &Value) -> Result<Value, ToolE
             let content = a["content"].as_str().ok_or_else(|| ToolError::Args("thiếu `content`".into()))?;
             let created = !abs.exists();
             write_file(&abs, content)?;
-            s.vault.index()?;
+            // Các tool ghi một file (create/write/replace/append/daily) chỉ index
+            // đúng file đó — quét cả vault cho mỗi lần agent sửa một note là phí.
+            // Thay đổi khác trên đĩa: app GUI index chung cache.db, hoặc gọi `reindex`.
+            s.vault.index_file(&rel)?;
             json!({ "path": rel, "created": created, "bytes": content.len() })
         }
         "append_note" => append_note(s, a)?,
@@ -389,7 +392,7 @@ pub(crate) fn call(s: &mut Server, name: &str, a: &Value) -> Result<Value, ToolE
             }
             let out = if n > 1 { content.replace(old, new) } else { content.replacen(old, new, 1) };
             write_file(&abs, &out)?;
-            s.vault.index()?;
+            s.vault.index_file(&rel)?;
             json!({ "path": rel, "replaced": n })
         }
         "rename_note" => {
@@ -452,7 +455,7 @@ pub(crate) fn call(s: &mut Server, name: &str, a: &Value) -> Result<Value, ToolE
             let created = !abs.exists();
             if created {
                 write_file(&abs, "")?;
-                s.vault.index()?;
+                s.vault.index_file(&rel)?;
             }
             let content = std::fs::read_to_string(&abs)?;
             json!({ "path": rel, "created": created, "content": content })
@@ -739,7 +742,7 @@ fn append_note(s: &mut Server, a: &Value) -> Result<Value, ToolError> {
         }
     }
     write_file(&abs, &content)?;
-    s.vault.index()?;
+    s.vault.index_file(&rel)?;
     Ok(json!({ "path": rel, "appended_bytes": add.len(), "under_heading": inserted_under }))
 }
 

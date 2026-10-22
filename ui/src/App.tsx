@@ -863,7 +863,8 @@ export default function App() {
    *  (updateContent giữ undo history, không phải setContent). */
   const saveSplit = async (path: string, content: string) => {
     try {
-      applyInfo(await api.writeNoteWithInfo(path, content));
+      const info = await api.writeNoteWithInfo(path, content);
+      if (info) applyInfo(info);
       if (currentPath === path) editor.updateContent(content);
       setStatus("Đã lưu ✓");
       setTimeout(() => setStatus((s) => (s === "Đã lưu ✓" ? "" : s)), 1500);
@@ -962,9 +963,10 @@ export default function App() {
   const saveCurrent = async (content: string) => {
     if (!currentPath) return;
     try {
-      // write_note đã index và trả VaultInfo — trước đây còn gọi thêm refresh(),
-      // tức là quét toàn vault hai lần cho mỗi lần autosave.
-      applyInfo(await api.writeNoteWithInfo(currentPath, content));
+      // write_note index đúng file vừa ghi; chỉ trả VaultInfo khi cây note / số link
+      // đổi (note mới, title, link) — gõ chữ thường trả null, khỏi dựng lại gì.
+      const info = await api.writeNoteWithInfo(currentPath, content);
+      if (info) applyInfo(info);
       // Cùng note đang mở ở pane phụ → đẩy sang cho hai bên không lệch nhau.
       if (splitPath() === currentPath) splitEd?.updateContent(content);
       setStatus("Đã lưu ✓");
@@ -1303,7 +1305,8 @@ export default function App() {
   /** Ghi một note rồi đồng bộ vào mọi pane đang mở nó. Dùng cho các thao tác
    *  sửa file "từ bên ngoài editor" (thêm property, gộp file). */
   const writeAndSync = async (path: string, content: string) => {
-    applyInfo(await api.writeNoteWithInfo(path, content));
+    const info = await api.writeNoteWithInfo(path, content);
+    if (info) applyInfo(info);
     if (currentPath === path) editor.updateContent(content);
     if (splitPath() === path) splitEd?.updateContent(content);
     schedulePanels(path);
