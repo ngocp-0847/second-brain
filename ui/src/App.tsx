@@ -760,6 +760,8 @@ export default function App() {
     setCurrent(null);
     setView("editor");
     editor.setContent("");
+    // Tab mới = note mới (Untitled) mở ngay trong tab đó; chưa mở vault thì để trống.
+    if (root()) void newNote();
   };
 
   const openNoteInNewTab = async (path: string) => {

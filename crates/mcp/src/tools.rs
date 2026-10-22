@@ -139,7 +139,7 @@ const TOOLS: &[Tool] = &[
     // ---------- ghi / sửa ----------
     Tool {
         name: "create_note", title: "Tạo note", read_only: false, destructive: false, idempotent: false,
-        description: "Tạo note mới (tự thêm .md, tự tạo thư mục). Lỗi nếu đã tồn tại. Không có content → `# <tên>` mặc định.",
+        description: "Tạo note mới (tự thêm .md, tự tạo thư mục). Lỗi nếu đã tồn tại. Không có content → file rỗng (app đã hiện tên file ở đầu trang).",
         schema: || obj(json!({
             "path": { "type": "string", "description": PATH_DESC },
             "content": { "type": "string" }
@@ -359,13 +359,9 @@ pub(crate) fn call(s: &mut Server, name: &str, a: &Value) -> Result<Value, ToolE
             if abs.exists() {
                 tbail!("đã tồn tại: {rel}");
             }
-            let stem = std::path::Path::new(&rel)
-                .file_stem()
-                .and_then(|x| x.to_str())
-                .unwrap_or("Untitled");
-            let content = opt_str(a, "content")
-                .map(String::from)
-                .unwrap_or_else(|| format!("# {stem}\n\n"));
+            // Mặc định rỗng: app hiện tên file bằng inline title, thêm `# <tên>`
+            // vào nội dung là thấy tên hai lần.
+            let content = opt_str(a, "content").map(String::from).unwrap_or_default();
             write_file(&abs, &content)?;
             s.vault.index_file(&rel)?;
             json!({ "path": rel, "created": true, "bytes": content.len() })
@@ -458,7 +454,7 @@ pub(crate) fn call(s: &mut Server, name: &str, a: &Value) -> Result<Value, ToolE
             let abs = s.vault.abs_path(&rel)?;
             let created = !abs.exists();
             if created {
-                write_file(&abs, &format!("# {date}\n\n"))?;
+                write_file(&abs, "")?;
                 s.vault.index_file(&rel)?;
             }
             let content = std::fs::read_to_string(&abs)?;

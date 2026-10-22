@@ -217,11 +217,9 @@ fn create_note(path: String, state: State<AppState>) -> CmdResult<String> {
         if let Some(dir) = abs.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let stem = std::path::Path::new(&rel)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Untitled");
-        std::fs::write(abs, format!("# {stem}\n\n"))?;
+        // File rỗng như Obsidian: tên note đã hiện bằng inline title ở đầu trang,
+        // ghi thêm `# <tên>` vào nội dung là thấy tên hai lần.
+        std::fs::write(abs, "")?;
         // Đúng một file mới → index_file đủ (nó tự resolve lại các link đang gãy
         // có thể đang chờ chính note này).
         v.index_file(&rel)?;
