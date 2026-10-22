@@ -41,8 +41,10 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+import type { SyntaxNode } from "@lezer/common";
 import type { NoteMeta } from "./api";
 import { imageFilesOf, isImagePath, resolveImageSrc, saveImageFile } from "./assets";
+import { bulletsToMarkdown, htmlToMarkdown } from "./htmlmd";
 
 /** Ba chế độ xem một note, đúng bộ của Obsidian:
  *  - `live`   — Live Preview: cú pháp ẩn trừ dòng đang có con trỏ (mặc định)
@@ -515,6 +517,31 @@ async function insertPastedImages(view: EditorView, files: File[], onAdded?: (p:
   }
 }
 
+// ---- dán text có định dạng (Slack, web, Docs) → Markdown ----
+
+/** Con trỏ đang trong code (fenced, thụt lề hay `inline`) → dán nguyên văn. */
+const inCode = (state: EditorState) => {
+  for (
+    let n: SyntaxNode | null = syntaxTree(state).resolveInner(state.selection.main.head, -1);
+    n;
+    n = n.parent
+  ) {
+    if (n.name === "FencedCode" || n.name === "CodeBlock" || n.name === "InlineCode") return true;
+  }
+  return false;
+};
+
+/** Markdown thay cho bản dán mặc định, hoặc null = để CodeMirror dán text/plain. */
+const pastedMarkdown = (data: DataTransfer | null): string | null => {
+  if (!data) return null;
+  const html = data.getData("text/html");
+  if (html) {
+    const md = htmlToMarkdown(html);
+    if (md !== null) return md;
+  }
+  return bulletsToMarkdown(data.getData("text/plain"));
+};
+
 // ---- widget thay cả khối (mermaid, bảng) phải đi qua StateField ----
 // CodeMirror CHẶN block decoration đến từ ViewPlugin ("Block decorations may not
 // be specified via plugins"), nên phần thay cả khối nằm ở state field này;
@@ -529,6 +556,8 @@ interface BlockPreview {
 }
 
 const FENCE = /^\s*(`{3,}|~{3,})\s*(\S*)/;
+/** Dòng có thể là đầu một khối (fence, bảng, ảnh) — lọc thô trước khi chạy regex thật. */
+const BLOCK_HINT = /`|~|\||!/;
 
 /** Bật ở Reading view. Decoration hỏi facet này thay vì một biến module — mỗi
  *  pane là một EditorState riêng nên chế độ phải nằm TRONG state. */
@@ -576,6 +605,13 @@ function buildBlocks(state: EditorState): BlockPreview {
   let i = 1;
   while (i <= doc.lines) {
     const text = doc.line(i).text;
+    // Hàm này chạy lại trên CẢ tài liệu mỗi lần gõ phím. Phần lớn dòng là văn
+    // xuôi, không chứa ký tự nào mở được khối (``` ~~~ | ![) — loại ngay bằng
+    // một lần quét thay vì chạy bốn regex.
+    if (!BLOCK_HINT.test(text)) {
+      i++;
+      continue;
+    }
     const fence = text.match(FENCE);
     if (fence) {
       const close = new RegExp("^\\s*" + fence[1][0] + "{" + fence[1].length + ",}\\s*$");
@@ -665,11 +701,20 @@ class TitleWidget extends WidgetType {
     return other.name === this.name;
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
+    // CodeMirror gán contenteditable=false lên DOM gốc của MỌI widget. Đặt
+    // contenteditable=true thẳng lên đó thì bị ghi đè — ô title nhìn như sửa
+    // được mà gõ không ăn, Enter/blur không bao giờ tới nên không đổi tên file.
+    // Nên bọc hai lớp: vỏ ngoài không sửa được, ô trong là một editing host
+    // RIÊNG (cha nó không editable) — focus, phím và blur đều về đúng ô này.
+    const wrap = document.createElement("div");
+    wrap.className = "cm-inline-title-wrap";
+    wrap.contentEditable = "false";
     const el = document.createElement("div");
     el.className = "cm-inline-title";
     el.textContent = this.name;
-    if (!this.onRename) return el;
+    wrap.append(el);
+    if (!this.onRename) return wrap;
 
     el.contentEditable = "true";
     el.spellcheck = false;
@@ -683,10 +728,13 @@ class TitleWidget extends WidgetType {
       this.onRename!(next);
     };
     el.addEventListener("keydown", (e) => {
-      // Title là MỘT dòng: Enter xác nhận rồi nhường focus cho nội dung.
-      if (e.key === "Enter") {
+      // Title là MỘT dòng: Enter (hay ↓) xác nhận rồi đưa con trỏ xuống đầu
+      // nội dung, như Obsidian.
+      if (e.key === "Enter" || e.key === "ArrowDown") {
         e.preventDefault();
         el.blur();
+        view.dispatch({ selection: { anchor: 0 }, scrollIntoView: true });
+        view.focus();
       } else if (e.key === "Escape") {
         e.preventDefault();
         el.textContent = this.name;
@@ -700,7 +748,7 @@ class TitleWidget extends WidgetType {
       const text = e.clipboardData?.getData("text/plain")?.replace(/\s+/g, " ");
       if (text) document.execCommand("insertText", false, text);
     });
-    return el;
+    return wrap;
   }
 
   /** Widget tự lo mọi sự kiện — để CodeMirror xử lý thì gõ vào đây sẽ loạn. */
@@ -715,6 +763,26 @@ class TitleWidget extends WidgetType {
     return true;
   }
 }
+
+/** ↑ ở hàng hiển thị đầu tiên của note → nhảy lên inline title (con trỏ cuối
+ *  tên), đối xứng với Enter/↓ trong title đưa xuống nội dung. */
+const focusTitle = (view: EditorView) => {
+  const head = view.state.selection.main.head;
+  if (view.state.doc.lineAt(head).number !== 1) return false;
+  // Dòng 1 dài bị wrap: ↑ ở hàng wrap thứ hai vẫn phải lên hàng trên của chính nó.
+  const top = view.coordsAtPos(head)?.top ?? 0;
+  if (top > (view.coordsAtPos(0)?.top ?? 0) + 2) return false;
+  const el = view.dom.querySelector<HTMLElement>('.cm-inline-title[contenteditable="true"]');
+  if (!el) return false;
+  el.focus();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  return true;
+};
 
 /** Widget nằm TRƯỚC dòng đầu (side < 0) nên không nuốt mất nội dung nào. */
 const titleDeco = (onRename?: (name: string) => void) => {
@@ -760,6 +828,88 @@ const blockPreview = StateField.define<BlockPreview>({
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
+// ---- `---`, bullet, checkbox: thay dấu cú pháp bằng thứ Obsidian vẽ ra ----
+// Đều là widget INLINE (thay đúng mấy ký tự cú pháp, không cả dòng) nên đi được
+// qua ViewPlugin. Bấm vào thì con trỏ vào dòng đó và dòng hiện lại text thô.
+
+class HrWidget extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-hr";
+    return el;
+  }
+  ignoreEvent() {
+    return false;
+  }
+}
+
+class BulletWidget extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-list-bullet";
+    el.textContent = "•";
+    return el;
+  }
+  ignoreEvent() {
+    return false;
+  }
+}
+
+class CheckboxWidget extends WidgetType {
+  constructor(readonly checked: boolean) {
+    super();
+  }
+  eq(other: CheckboxWidget) {
+    return other.checked === this.checked;
+  }
+  toDOM(view: EditorView) {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "cm-task-box";
+    box.checked = this.checked;
+    // Tự đổi `[ ]` ↔ `[x]` trong file; mousedown chặn để con trỏ không nhảy
+    // vào dòng (nhảy vào là dòng hiện text thô, checkbox biến mất giữa chừng).
+    box.addEventListener("mousedown", (e) => e.preventDefault());
+    box.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (!view.state.facet(EditorView.editable)) return;
+      const pos = view.posAtDOM(box);
+      const mark = view.state.sliceDoc(pos, pos + 3);
+      if (!/^\[[ xX]\]$/.test(mark)) return;
+      view.dispatch({
+        changes: { from: pos + 1, to: pos + 2, insert: this.checked ? " " : "x" },
+        userEvent: "input",
+      });
+    });
+    return box;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+const hrDeco = Decoration.replace({ widget: new HrWidget() });
+const bulletDeco = Decoration.replace({ widget: new BulletWidget() });
+
+/** Cuối khối YAML frontmatter (`---` … `---` ở đầu file), 0 nếu không có.
+ *  Lezer không biết frontmatter: hai dấu `---` sẽ bị hiểu là kẻ ngang / heading
+ *  setext — không được vẽ chúng thành đường kẻ. */
+const frontmatterEnd = (state: EditorState) => {
+  const doc = state.doc;
+  if (doc.lines < 2 || doc.line(1).text.trimEnd() !== "---") return 0;
+  for (let i = 2; i <= Math.min(doc.lines, 300); i++) {
+    const t = doc.line(i).text.trimEnd();
+    if (t === "---" || t === "...") return doc.line(i).to;
+  }
+  return 0;
+};
+
 /** Decoration inline: ẩn dấu cú pháp và render [[wikilink]] gọn. Khối đã bị
  *  blockPreview thay bằng widget thì bỏ qua — không chồng lên được. */
 function buildLivePreview(view: EditorView): DecorationSet {
@@ -769,21 +919,51 @@ function buildLivePreview(view: EditorView): DecorationSet {
   // Source mode gỡ blockPreview khỏi cấu hình → không có field để đọc.
   const spans = state.field(blockPreview, false)?.spans ?? [];
   const inReplaced = (a: number, b: number) => spans.some((r) => a < r.to && b > r.from);
+  const fmEnd = frontmatterEnd(state);
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
       from,
       to,
       enter(node) {
+        const name = node.name;
         if (
-          node.name !== "HeaderMark" &&
-          node.name !== "EmphasisMark" &&
-          node.name !== "CodeMark" &&
-          node.name !== "QuoteMark"
+          name !== "HeaderMark" &&
+          name !== "EmphasisMark" &&
+          name !== "CodeMark" &&
+          name !== "QuoteMark" &&
+          name !== "HorizontalRule" &&
+          name !== "ListMark" &&
+          name !== "TaskMarker"
         )
           return;
+        if (node.from < fmEnd) return;
         if (activeLines.has(state.doc.lineAt(node.from).number)) return;
         if (inReplaced(node.from, node.to)) return;
+        if (name === "HorizontalRule") {
+          decos.push(hrDeco.range(node.from, node.to));
+          return;
+        }
+        if (name === "TaskMarker") {
+          const checked = /x/i.test(state.sliceDoc(node.from, node.to));
+          decos.push(
+            Decoration.replace({ widget: new CheckboxWidget(checked) }).range(node.from, node.to),
+          );
+          return;
+        }
+        if (name === "ListMark") {
+          // Chỉ list gạch đầu dòng mới đổi thành chấm; list số giữ "1." như Obsidian.
+          const item = node.node.parent;
+          if (item?.parent?.name !== "BulletList") return;
+          // Mục task: checkbox thay luôn vai trò bullet → ẩn hẳn "- ".
+          if (item.getChild("Task")) {
+            const end = state.sliceDoc(node.to, node.to + 1) === " " ? node.to + 1 : node.to;
+            decos.push(hideMark.range(node.from, end));
+          } else {
+            decos.push(bulletDeco.range(node.from, node.to));
+          }
+          return;
+        }
         let end = node.to;
         if (node.name === "HeaderMark" && state.doc.sliceString(end, end + 1) === " ") end++;
         // CodeMark của fenced block (```): giữ nguyên, chỉ ẩn inline `
@@ -895,6 +1075,24 @@ const themeStyles = {
   ".cm-activeLine": { backgroundColor: "var(--line-active)" },
   ".cm-wikilink": { color: "var(--accent)", cursor: "pointer" },
   ".cm-wikilink:hover": { textDecoration: "underline" },
+  // `---` đã render: một đường kẻ chạy hết bề ngang dòng.
+  ".cm-hr": {
+    display: "inline-block",
+    width: "100%",
+    verticalAlign: "middle",
+    borderTop: "1px solid var(--border-card)",
+  },
+  // Chấm bullet thay cho "-": cỡ chữ ngang "-" nên bấm vào dòng chữ không xô.
+  ".cm-list-bullet": {
+    color: "var(--fg-muted)",
+    fontWeight: "700",
+  },
+  ".cm-task-box": {
+    margin: "0 0.4em 0 0",
+    verticalAlign: "-0.1em",
+    cursor: "pointer",
+    accentColor: "var(--accent)",
+  },
   ".cm-mermaid": {
     position: "relative",
     maxWidth: "46rem",
@@ -1059,6 +1257,7 @@ export function createEditor(opts: EditorOpts): EditorHandle {
   let suppress = false; // đang setContent, đừng autosave
   let dark = opts.dark ?? true;
   let mode: EditorMode = opts.mode ?? "live";
+  let plainPaste = false; // vừa bấm Ctrl+Shift+V
   mermaidDark = dark; // trước khi mermaid được lazy-load lần đầu
 
   const flush = () => {
@@ -1144,7 +1343,8 @@ export function createEditor(opts: EditorOpts): EditorHandle {
         titleDeco(opts.onRenameTitle),
         themeConf.of(makeTheme(dark)),
         autocompletion({ override: [wikiComplete], activateOnTyping: true }),
-        keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap, indentWithTab]),
+        keymap.of([{ key: "ArrowUp", run: focusTitle }]),
+        keymap.of([...defaultKeymap,...historyKeymap, ...searchKeymap, ...completionKeymap, indentWithTab]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged && !suppress) {
             dirty = true;
@@ -1159,12 +1359,28 @@ export function createEditor(opts: EditorOpts): EditorHandle {
           // Còn lại là dán thường: dán block mermaid xong con trỏ nằm trong
           // block nên nó hiện code thô — đưa con trỏ ra ngay sau block để
           // diagram render luôn.
+          keydown(e) {
+            // Ctrl+Shift+V = dán text thô như Obsidian. Sự kiện paste không cho
+            // biết phím nào bấm ra nó, nên đánh dấu ở đây rồi paste đọc lại.
+            plainPaste = (e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "v";
+            return false;
+          },
           paste(e, view) {
             const imgs = imageFilesOf(e.clipboardData);
             if (imgs.length) {
               e.preventDefault();
               void insertPastedImages(view, imgs, opts.onAssetAdded);
               return true;
+            }
+            const plain = plainPaste;
+            plainPaste = false;
+            const md = plain || inCode(view.state) ? null : pastedMarkdown(e.clipboardData);
+            if (md !== null) {
+              e.preventDefault();
+              view.dispatch(view.state.replaceSelection(md), {
+                userEvent: "input.paste",
+                scrollIntoView: true,
+              });
             }
             queueMicrotask(() => {
               const blk = mermaidBlockAt(view.state, view.state.selection.main.head);
@@ -1182,7 +1398,7 @@ export function createEditor(opts: EditorOpts): EditorHandle {
                 view.dispatch({ selection: { anchor: blk.to + 1 } });
               }
             });
-            return false;
+            return md !== null;
           },
           mousedown(e) {
             if (!(e.ctrlKey || e.metaKey)) return false;
@@ -1234,7 +1450,13 @@ export function createEditor(opts: EditorOpts): EditorHandle {
       flush();
     },
     setTitle(name) {
-      if (name === title) return;
+      if (name === title) {
+        // Đổi tên thất bại / trùng tên cũ: state không đổi nên widget được tái
+        // dùng nguyên DOM — chữ user vừa gõ vẫn nằm đó. Trả lại tên thật bằng tay.
+        const el = view.dom.querySelector<HTMLElement>(".cm-inline-title");
+        if (el && name !== null && el.textContent !== name) el.textContent = name;
+        return;
+      }
       title = name;
       view.dispatch({ effects: titleEffect.of(name) });
     },
