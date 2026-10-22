@@ -5,6 +5,7 @@ import {
   createMemo,
   createSignal,
   For,
+  lazy,
   onCleanup,
   onMount,
   Show,
@@ -24,10 +25,8 @@ import {
   type SearchHit,
   type Stats,
 } from "./api";
-import { CanvasView } from "./canvas";
 import { ChatPanel, type ChatSelection } from "./chat";
 import { createEditor, type EditorHandle, type EditorMode, type SelectionInfo } from "./editor";
-import { GraphView } from "./graph";
 import {
   IconAdd,
   IconAgent,
@@ -94,8 +93,6 @@ import {
 } from "./icons";
 import { ContextMenu, type MenuAnchor, type MenuItem } from "./menu";
 import { Crumbs, SplitPane } from "./pane";
-import { exportToPdf } from "./print";
-import { TermPanel } from "./terminal";
 import { DragGhost, setDirDropHandler } from "./dnd";
 import { parentDir, Tree, type TreeEditing, type TreeFile } from "./tree";
 import { isImagePath } from "./assets";
@@ -115,6 +112,13 @@ import {
 import { isDark, setThemePref, theme, themePref, toggleTheme, type ThemePref } from "./theme";
 
 type View = "editor" | "graph" | "canvas" | "image";
+
+// Mấy view này chỉ dùng khi người dùng mở tới (terminal kéo theo cả xterm
+// ~350KB). Import tĩnh thì webview phải tải + parse hết lúc khởi động dù phần
+// lớn phiên không đụng tới — tách chunk, lần đầu mở mới tải.
+const CanvasView = lazy(() => import("./canvas").then((m) => ({ default: m.CanvasView })));
+const GraphView = lazy(() => import("./graph").then((m) => ({ default: m.GraphView })));
+const TermPanel = lazy(() => import("./terminal").then((m) => ({ default: m.TermPanel })));
 
 /** `?note=` do `open_note_window` gắn vào URL: cửa sổ này chỉ để xem đúng một
  *  note, nên bỏ qua khôi phục phiên VÀ không được ghi đè workspace đã lưu. */
@@ -268,6 +272,8 @@ export default function App() {
   const [chatOpen, setChatOpen] = createSignal(localStorage.getItem("chatOpen") === "1");
   const [rightOpen, setRightOpen] = createSignal(localStorage.getItem("rightOpen") !== "0");
   const [termVisible, setTermVisible] = createSignal(false);
+  // Terminal đã từng mở trong phiên → giữ component (và PTY) sống khi ẩn.
+  const termMounted = createMemo<boolean>((was) => was || termVisible(), false);
   const [syncBusy, setSyncBusy] = createSignal(false);
 
   // Vùng chọn trong editor → prompt AI sửa tại chỗ (popover) hoặc đẩy sang chat Agent.
@@ -1311,6 +1317,7 @@ export default function App() {
 
   const exportPdf = async (path: string) => {
     try {
+      const { exportToPdf } = await import("./print");
       await exportToPdf(fileLabel(path), await latestContent(path));
     } catch (e) {
       say(String(e));
@@ -2685,7 +2692,10 @@ export default function App() {
             />
           </Show>
         </div>
-        <TermPanel visible={termVisible()} onClose={() => setTermVisible(false)} />
+        {/* Chỉ dựng khi mở lần đầu; sau đó giữ nguyên (ẩn bằng CSS) để không giết phiên PTY. */}
+        <Show when={termMounted()}>
+          <TermPanel visible={termVisible()} onClose={() => setTermVisible(false)} />
+        </Show>
         <Show when={settingsOpen()}>
           <div class="settings-page">
             <div class="settings-page-head">
