@@ -1,7 +1,7 @@
 //! Cache SQLite trong `.brain/cache.db`. Toàn bộ dữ liệu tái tạo được từ file .md.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 /// Bump khi đổi schema: cache là dữ liệu tái tạo được nên chỉ cần drop & rebuild.
@@ -248,55 +248,119 @@ impl Db {
 
     /// Resolve toàn bộ wikilink theo kiểu Obsidian:
     /// khớp đường dẫn tương đối trước, sau đó khớp theo tên file (stem) không phân biệt hoa thường.
-    pub fn resolve_links(&mut self) -> Result<()> {
-        use std::collections::HashMap;
-        let notes = self.all_notes()?;
-        let mut by_path: HashMap<String, i64> = HashMap::new();
-        let mut by_stem: HashMap<String, Vec<i64>> = HashMap::new();
-        for n in &notes {
-            let lower = n.path.to_lowercase();
-            by_path.insert(lower.clone(), n.id);
-            by_path.insert(lower.trim_end_matches(".md").to_string(), n.id);
-            let stem = Path::new(&n.path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            by_stem.entry(stem).or_default().push(n.id);
-        }
+    /// Trả về số link có `target_note` thực sự đổi.
+    pub fn resolve_links(&mut self) -> Result<usize> {
+        let r = LinkResolver::load(&self.conn)?;
+        self.resolve_links_where(&r, "1", [])
+    }
 
-        let links: Vec<(i64, String)> = {
-            let mut stmt = self.conn.prepare("SELECT id, target_path FROM link")?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
+    /// Chỉ resolve link đi ra từ một note — dùng sau `upsert_note` một file lẻ:
+    /// upsert xóa rồi chèn lại link của note đó với `target_note` NULL, còn link
+    /// của các note khác không đổi gì nên khỏi đụng tới.
+    pub fn resolve_links_from(&mut self, src_note: i64) -> Result<usize> {
+        let r = LinkResolver::load(&self.conn)?;
+        self.resolve_links_where(&r, "src_note = ?1", [src_note])
+    }
+
+    /// Note `path` vừa xuất hiện: resolve lại những link có thể đổi đích vì nó —
+    /// link đang gãy, và link đang trỏ tới note KHÁC cùng stem (vd `[[foo]]` đang
+    /// khớp `sub/foo.md` theo stem, giờ có `foo.md` ở gốc khớp theo path, ưu tiên hơn).
+    /// Link đã trỏ tới note có stem khác thì note mới không thể "cướp" được.
+    pub fn resolve_links_near(&mut self, path: &str) -> Result<usize> {
+        let r = LinkResolver::load(&self.conn)?;
+        // id là i64 từ chính db nên nhúng thẳng vào SQL được, không lo injection.
+        let same_stem: Vec<String> =
+            r.ids_with_stem(&stem_key(path)).iter().map(|id| id.to_string()).collect();
+        let filter = if same_stem.is_empty() {
+            "target_note IS NULL".to_string()
+        } else {
+            format!("target_note IS NULL OR target_note IN ({})", same_stem.join(","))
         };
+        self.resolve_links_where(&r, &filter, [])
+    }
+
+    /// Note `note_id` vừa bị xóa khỏi db: link trỏ tới nó (cột `target_note` không
+    /// có FK nên vẫn giữ id cũ) phải resolve lại — gãy, hoặc chuyển sang note cùng stem.
+    pub fn resolve_links_to(&mut self, note_id: i64) -> Result<usize> {
+        let r = LinkResolver::load(&self.conn)?;
+        self.resolve_links_where(&r, "target_note = ?1", [note_id])
+    }
+
+    /// Lõi chung của các hàm resolve: chỉ xét link khớp `filter` (mệnh đề WHERE
+    /// trên bảng `link`) và chỉ UPDATE link có đích thực sự đổi. Trước đây mọi
+    /// lượt index đều UPDATE từng link của cả vault dù hầu hết y nguyên — với vài
+    /// nghìn note là vài chục nghìn lệnh ghi cho một nhịp autosave.
+    fn resolve_links_where(
+        &mut self,
+        r: &LinkResolver,
+        filter: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<usize> {
+        let changed: Vec<(i64, Option<i64>)> = {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT id, target_path, target_note FROM link WHERE {filter}"))?;
+            let rows = stmt
+                .query_map(params, |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .filter_map(|(id, target, current)| {
+                    let resolved = r.resolve(&target);
+                    (resolved != current).then_some((id, resolved))
+                })
+                .collect()
+        };
+        if changed.is_empty() {
+            return Ok(0);
+        }
 
         let tx = self.conn.transaction()?;
         {
             let mut upd = tx.prepare_cached("UPDATE link SET target_note = ?1 WHERE id = ?2")?;
-            for (link_id, target) in links {
-                let key = target.replace('\\', "/").to_lowercase();
-                let key = key.trim_start_matches("./").trim_end_matches('/');
-                let resolved = by_path
-                    .get(key)
-                    .copied()
-                    .or_else(|| by_path.get(key.trim_end_matches(".md")).copied())
-                    .or_else(|| {
-                        let stem = key.rsplit('/').next().unwrap_or(key);
-                        let stem = stem.trim_end_matches(".md");
-                        match by_stem.get(stem).map(Vec::as_slice) {
-                            Some([single]) => Some(*single),
-                            Some(multi) if !multi.is_empty() => Some(multi[0]),
-                            _ => None,
-                        }
-                    });
+            for (link_id, resolved) in &changed {
                 upd.execute(params![resolved, link_id])?;
             }
         }
         tx.commit()?;
-        Ok(())
+        Ok(changed.len())
+    }
+
+    /// Hàng `note` theo path (None nếu chưa index).
+    pub fn note_row(&self, path: &str) -> Result<Option<NoteRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, path, title, mtime, size, content_hash FROM note WHERE path = ?1",
+        )?;
+        let row = stmt
+            .query_row([path], |r| {
+                Ok(NoteRow {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    title: r.get(2)?,
+                    mtime: r.get(3)?,
+                    size: r.get(4)?,
+                    content_hash: r.get(5)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Đích của mọi link đi ra từ note, đã sắp — để so trước/sau khi index một file
+    /// mà không phụ thuộc offset (gõ chữ phía trước link làm offset đổi liên tục).
+    pub fn outgoing_targets(&self, note_id: i64) -> Result<Vec<(String, Option<i64>)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT target_path, target_note FROM link WHERE src_note = ?1 ORDER BY target_path, target_note",
+        )?;
+        let rows = stmt
+            .query_map([note_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn backlinks(&self, note_ref: &str) -> Result<Vec<BacklinkRow>> {
@@ -684,6 +748,62 @@ impl Db {
         let chunks: i64 = self.conn.query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get(0))?;
         Ok((notes, links, broken, tags, chunks))
     }
+}
+
+/// Bảng tra path/stem → note id cho một lượt resolve link.
+///
+/// Dựng từ `SELECT id, path` (rẻ hơn `all_notes` vì không kéo hash). Phải
+/// `ORDER BY id`: thiếu nó SQLite dễ quét index UNIQUE(path) cho rẻ và trả theo
+/// path. Theo id thì khi nhiều note trùng stem, note index trước thắng — note mới
+/// luôn đứng cuối nên không cướp link của note cũ, resolve có phạm vi dựa vào đó.
+struct LinkResolver {
+    by_path: std::collections::HashMap<String, i64>,
+    by_stem: std::collections::HashMap<String, Vec<i64>>,
+}
+
+impl LinkResolver {
+    fn load(conn: &Connection) -> Result<Self> {
+        use std::collections::HashMap;
+        let mut by_path: HashMap<String, i64> = HashMap::new();
+        let mut by_stem: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut stmt = conn.prepare("SELECT id, path FROM note ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, path) = row?;
+            let lower = path.to_lowercase();
+            by_path.insert(lower.clone(), id);
+            by_path.insert(lower.trim_end_matches(".md").to_string(), id);
+            by_stem.entry(stem_key(&path)).or_default().push(id);
+        }
+        Ok(LinkResolver { by_path, by_stem })
+    }
+
+    fn resolve(&self, target: &str) -> Option<i64> {
+        let key = target.replace('\\', "/").to_lowercase();
+        let key = key.trim_start_matches("./").trim_end_matches('/');
+        self.by_path
+            .get(key)
+            .copied()
+            .or_else(|| self.by_path.get(key.trim_end_matches(".md")).copied())
+            .or_else(|| {
+                let stem = key.rsplit('/').next().unwrap_or(key);
+                let stem = stem.trim_end_matches(".md");
+                self.by_stem.get(stem).and_then(|ids| ids.first().copied())
+            })
+    }
+
+    fn ids_with_stem(&self, stem: &str) -> &[i64] {
+        self.by_stem.get(stem).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// Stem viết thường của một path note — khóa tra `by_stem`.
+fn stem_key(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 fn connect(db_path: &Path) -> Result<Connection> {

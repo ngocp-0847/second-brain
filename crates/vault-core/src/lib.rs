@@ -10,4 +10,4 @@ pub mod vault;
 pub mod watcher;
 
 pub use parser::{Chunk, LinkKind, ParsedNote, RawLink};
-pub use vault::{IndexStats, Vault};
+pub use vault::{FileIndexOutcome, IndexStats, Vault};

@@ -26,6 +26,30 @@ pub struct IndexStats {
     pub duration_ms: u128,
 }
 
+/// Kết quả index MỘT file (`Vault::index_file`) — đủ để caller biết lần ghi này
+/// có đụng tới thứ UI đang hiện (cây note, số link/link gãy) hay chỉ đổi nội dung.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FileIndexOutcome {
+    /// Note chưa có trong db trước lần này.
+    pub is_new: bool,
+    /// File không còn trên đĩa → đã gỡ khỏi db.
+    pub removed: bool,
+    /// Hash nội dung khác bản trong db (note mới/bị xóa cũng tính là đổi).
+    pub content_changed: bool,
+    pub title_changed: bool,
+    /// Tập đích link đi ra (target + note đã resolve) khác trước — kéo theo số
+    /// link / link gãy trên status bar.
+    pub links_changed: bool,
+}
+
+impl FileIndexOutcome {
+    /// Danh sách note, thư mục hoặc thống kê link có thể đã khác → cần dựng lại
+    /// overview. Chỉ sửa chữ trong thân note thì không.
+    pub fn changes_overview(&self) -> bool {
+        self.is_new || self.removed || self.title_changed || self.links_changed
+    }
+}
+
 struct FileMeta {
     rel_path: String,
     abs_path: PathBuf,
@@ -88,13 +112,9 @@ impl Vault {
             .filter_map(|f| {
                 let content = std::fs::read_to_string(&f.abs_path).ok()?;
                 let hash = blake3::hash(content.as_bytes()).as_bytes().to_vec();
-                let stem = Path::new(&f.rel_path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&f.rel_path);
                 Some(ParsedFile {
                     rel_path: f.rel_path.clone(),
-                    parsed: parse_note(&content, stem),
+                    parsed: parse_note(&content, note_stem(&f.rel_path)),
                     mtime: f.mtime,
                     size: f.size,
                     hash,
@@ -118,6 +138,111 @@ impl Vault {
 
         stats.duration_ms = t0.elapsed().as_millis();
         Ok(stats)
+    }
+
+    /// Index đúng một file vừa ghi, thay cho `index()` toàn vault.
+    ///
+    /// `index()` phải walkdir + stat mọi file, nạp mọi note từ db rồi resolve lại
+    /// toàn bộ link — quá đắt cho một nhịp autosave khi ta đã biết chính xác file
+    /// nào đổi. Ở đây: đọc + hash đúng file đó; hash y nguyên thì không ghi gì;
+    /// khác thì upsert và chỉ resolve phần link có thể bị ảnh hưởng.
+    ///
+    /// Không thay được `index()` cho rename/xóa thư mục/thay đổi từ bên ngoài —
+    /// những việc đó đụng nhiều file mà ta không biết trước.
+    pub fn index_file(&mut self, rel: &str) -> Result<FileIndexOutcome> {
+        let mut out = FileIndexOutcome::default();
+        let mut rel = rel.replace('\\', "/");
+        // Canvas cũng được ghi qua write_note — không phải note thì bỏ qua êm,
+        // giống `scan_files` chỉ nhận .md nằm ngoài SKIP_DIRS.
+        if !is_indexable(&rel) {
+            return Ok(out);
+        }
+        let mut prev = self.db.note_row(&rel)?;
+        if prev.is_none() {
+            // FS không phân biệt hoa thường (Windows/macOS): agent gọi qua MCP có
+            // thể gõ `projects/alpha.md` cho file `Projects/Alpha.md`. Không chuẩn
+            // hóa thì db mọc thêm một hàng trùng mà `index()` sẽ không bao giờ tạo.
+            let real = self.disk_case(&rel);
+            if real != rel {
+                rel = real;
+                prev = self.db.note_row(&rel)?;
+            }
+        }
+        let abs = self.abs_path(&rel)?;
+
+        let meta = match std::fs::metadata(&abs) {
+            Ok(m) if m.is_file() => m,
+            _ => {
+                // File đã biến mất → xử lý như xóa, để db không giữ note ma.
+                if let Some(p) = prev {
+                    self.db.remove_notes(&[rel])?;
+                    self.db.resolve_links_to(p.id)?;
+                    out.removed = true;
+                    out.content_changed = true;
+                    out.links_changed = true;
+                }
+                return Ok(out);
+            }
+        };
+        // Không phải UTF-8 → bỏ qua như `index()` vẫn làm.
+        let Ok(content) = std::fs::read_to_string(&abs) else { return Ok(out) };
+        let hash = blake3::hash(content.as_bytes()).as_bytes().to_vec();
+        if prev.as_ref().is_some_and(|p| p.content_hash == hash) {
+            return Ok(out);
+        }
+
+        let parsed = parse_note(&content, note_stem(&rel));
+        let before = match &prev {
+            Some(p) => self.db.outgoing_targets(p.id)?,
+            None => Vec::new(),
+        };
+        let mtime = mtime_secs(&meta).unwrap_or(0);
+        let id = self.db.upsert_note(&rel, &parsed, mtime, meta.len() as i64, &hash)?;
+        if prev.is_some() {
+            // Note cũ đổi nội dung: path không đổi nên link của note khác vẫn
+            // đúng đích, chỉ link đi ra của nó (vừa chèn lại, NULL) cần resolve.
+            self.db.resolve_links_from(id)?;
+        } else {
+            // Note mới: có thể "chữa" link đang gãy trỏ tới nó. Tập link NULL đã
+            // gồm cả link đi ra của chính nó nên một lượt là đủ.
+            self.db.resolve_links_near(&rel)?;
+        }
+        let after = self.db.outgoing_targets(id)?;
+
+        out.is_new = prev.is_none();
+        out.content_changed = true;
+        out.title_changed = prev.as_ref().map_or(true, |p| p.title != parsed.title);
+        out.links_changed = before != after;
+        Ok(out)
+    }
+
+    /// Path tương đối viết đúng hoa thường như trên đĩa (từng component, so
+    /// không phân biệt hoa thường). Component nào không tìm thấy thì giữ nguyên.
+    fn disk_case(&self, rel: &str) -> String {
+        let mut dir = self.root.clone();
+        let mut parts = Vec::new();
+        for comp in rel.split('/') {
+            let want = comp.to_lowercase();
+            let real = std::fs::read_dir(&dir)
+                .ok()
+                .and_then(|rd| {
+                    let mut fuzzy = None;
+                    for e in rd.flatten() {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if name == comp {
+                            return Some(name);
+                        }
+                        if fuzzy.is_none() && name.to_lowercase() == want {
+                            fuzzy = Some(name);
+                        }
+                    }
+                    fuzzy
+                })
+                .unwrap_or_else(|| comp.to_string());
+            dir.push(&real);
+            parts.push(real);
+        }
+        parts.join("/")
     }
 
     /// Đường dẫn tuyệt đối của một path tương đối, chặn traversal ra ngoài vault.
@@ -362,12 +487,7 @@ impl Vault {
             })
             .filter_map(|e| {
                 let meta = e.metadata().ok()?;
-                let mtime = meta
-                    .modified()
-                    .ok()?
-                    .duration_since(UNIX_EPOCH)
-                    .ok()?
-                    .as_secs() as i64;
+                let mtime = mtime_secs(&meta)?;
                 let rel = e
                     .path()
                     .strip_prefix(&self.root)
@@ -383,6 +503,25 @@ impl Vault {
             })
             .collect()
     }
+}
+
+/// mtime (epoch giây) — cùng một cách tính cho `index()` và `index_file()`, lệch
+/// nhau là lượt `index()` sau sẽ tưởng file đổi và đọc lại vô ích.
+fn mtime_secs(meta: &std::fs::Metadata) -> Option<i64> {
+    Some(meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64)
+}
+
+/// Tên file không đuôi — title dự phòng khi note không có H1/frontmatter.
+fn note_stem(rel: &str) -> &str {
+    Path::new(rel).file_stem().and_then(|s| s.to_str()).unwrap_or(rel)
+}
+
+/// File có thuộc index không: đuôi .md và không nằm dưới thư mục nào trong SKIP_DIRS.
+fn is_indexable(rel: &str) -> bool {
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    let Some(name) = parts.pop() else { return false };
+    Path::new(name).extension().is_some_and(|x| x.eq_ignore_ascii_case("md"))
+        && !parts.iter().any(|d| SKIP_DIRS.contains(d))
 }
 
 /// Viết lại một link (slice nguyên văn từ file nguồn) để trỏ tới target mới,
@@ -640,6 +779,135 @@ mod tests {
 
         // limit đếm theo note, không phải theo chunk.
         assert_eq!(v.db.search_notes("tokio", 1).unwrap().len(), 1);
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Sau `index_file`, resolve lại TOÀN BỘ mà còn đổi được link nào nghĩa là
+    /// resolve có phạm vi đã bỏ sót — db phải y như vừa chạy `index()`.
+    fn assert_links_settled(v: &mut Vault) {
+        assert_eq!(v.db.resolve_links().unwrap(), 0, "index_file để sót link chưa resolve");
+    }
+
+    #[test]
+    fn index_file_chi_bao_doi_khi_can() {
+        let tmp = std::env::temp_dir().join(format!("brain-ifile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write(&tmp, "a.md", "# Alpha\nThân bài. Xem [[Beta]].\n");
+        write(&tmp, "beta.md", "# Beta\nNội dung.\n");
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+
+        // Ghi lại y nguyên → không ghi gì vào db.
+        write(&tmp, "a.md", "# Alpha\nThân bài. Xem [[Beta]].\n");
+        assert_eq!(v.index_file("a.md").unwrap(), FileIndexOutcome::default());
+
+        // Chỉ sửa chữ (kể cả làm offset của link dịch đi) → không cần dựng overview.
+        write(&tmp, "a.md", "# Alpha\nThân bài dài hơn. Xem [[Beta]].\n");
+        let o = v.index_file("a.md").unwrap();
+        assert!(o.content_changed && !o.is_new && !o.title_changed && !o.links_changed, "{o:?}");
+        assert!(!o.changes_overview());
+        assert!(v.db.search("dài", 10).unwrap().iter().any(|h| h.path == "a.md"));
+        assert_eq!(v.db.backlinks("beta.md").unwrap().len(), 1);
+        assert_links_settled(&mut v);
+
+        // Đổi H1 → title đổi.
+        write(&tmp, "a.md", "# Alpha mới\nThân bài dài hơn. Xem [[Beta]].\n");
+        let o = v.index_file("a.md").unwrap();
+        assert!(o.title_changed && !o.links_changed, "{o:?}");
+        assert!(v.db.note_list().unwrap().iter().any(|(p, t, _)| p == "a.md" && t == "Alpha mới"));
+
+        // Thêm link gãy → links đổi, số link gãy tăng.
+        write(&tmp, "a.md", "# Alpha mới\nXem [[Beta]] và [[Gamma]].\n");
+        let o = v.index_file("a.md").unwrap();
+        assert!(o.links_changed && o.changes_overview(), "{o:?}");
+        assert_eq!(v.db.broken_links().unwrap().len(), 1);
+        assert_links_settled(&mut v);
+
+        // Canvas / file ngoài index → bỏ qua êm.
+        write(&tmp, "x.canvas", "{}");
+        assert_eq!(v.index_file("x.canvas").unwrap(), FileIndexOutcome::default());
+        write(&tmp, ".obsidian/n.md", "# Không index\n");
+        assert_eq!(v.index_file(".obsidian/n.md").unwrap(), FileIndexOutcome::default());
+        assert_eq!(v.db.note_list().unwrap().len(), 2);
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn index_file_note_moi_va_note_bi_xoa() {
+        let tmp = std::env::temp_dir().join(format!("brain-ifile-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write(&tmp, "a.md", "# Alpha\n[[Gamma]] · [[foo]]\n");
+        write(&tmp, "sub/foo.md", "# Foo cũ\n");
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+        assert_eq!(v.db.broken_links().unwrap().len(), 1);
+        assert_eq!(v.db.backlinks("sub/foo.md").unwrap().len(), 1);
+
+        // Note mới chữa link đang gãy trỏ tới nó.
+        write(&tmp, "Gamma.md", "# Gamma\nVề lại [[a]].\n");
+        let o = v.index_file("Gamma.md").unwrap();
+        assert!(o.is_new && o.changes_overview(), "{o:?}");
+        assert!(v.db.broken_links().unwrap().is_empty());
+        assert_eq!(v.db.backlinks("Gamma.md").unwrap().len(), 1);
+        // Link đi ra của chính note mới cũng resolve luôn.
+        assert_eq!(v.db.backlinks("a.md").unwrap().len(), 1);
+        assert_links_settled(&mut v);
+
+        // `foo.md` ở gốc khớp `[[foo]]` theo path — được ưu tiên hơn `sub/foo.md`
+        // đang khớp theo stem, dù link đó không hề gãy.
+        write(&tmp, "foo.md", "# Foo gốc\n");
+        v.index_file("foo.md").unwrap();
+        assert_eq!(v.db.backlinks("foo.md").unwrap().len(), 1);
+        assert!(v.db.backlinks("sub/foo.md").unwrap().is_empty());
+        assert_links_settled(&mut v);
+
+        // File biến mất → gỡ khỏi db, link trỏ tới nó rơi về note cùng stem còn lại.
+        std::fs::remove_file(tmp.join("foo.md")).unwrap();
+        let o = v.index_file("foo.md").unwrap();
+        assert!(o.removed && o.changes_overview(), "{o:?}");
+        assert_eq!(v.db.backlinks("sub/foo.md").unwrap().len(), 1);
+        assert_links_settled(&mut v);
+
+        // Không còn note cùng stem nào → link thành gãy.
+        std::fs::remove_file(tmp.join("Gamma.md")).unwrap();
+        assert!(v.index_file("Gamma.md").unwrap().removed);
+        assert_eq!(v.db.broken_links().unwrap().len(), 1);
+        assert_links_settled(&mut v);
+
+        // Path không tồn tại và chưa từng index → không làm gì.
+        assert_eq!(v.index_file("khong-co.md").unwrap(), FileIndexOutcome::default());
+
+        drop(v);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn index_file_giu_hoa_thuong_nhu_tren_dia() {
+        let tmp = std::env::temp_dir().join(format!("brain-ifile-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write(&tmp, "Sub/Alpha.md", "# Alpha\n");
+        // Chỉ có ý nghĩa trên FS không phân biệt hoa thường (Windows, macOS mặc định).
+        if !tmp.join("sub/alpha.md").exists() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+
+        let mut v = Vault::open(&tmp).unwrap();
+        v.index().unwrap();
+        write(&tmp, "sub/alpha.md", "# Alpha\nSửa qua path viết thường.\n");
+        let o = v.index_file("sub/alpha.md").unwrap();
+        assert!(!o.is_new, "{o:?}");
+        let paths: Vec<_> = v.db.note_list().unwrap().into_iter().map(|(p, _, _)| p).collect();
+        assert_eq!(paths, vec!["Sub/Alpha.md"]);
 
         drop(v);
         let _ = std::fs::remove_dir_all(&tmp);

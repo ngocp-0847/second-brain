@@ -166,10 +166,10 @@ fn read_note(path: String, state: State<AppState>) -> CmdResult<String> {
 }
 
 #[tauri::command]
-/// `with_info` = true thì trả luôn VaultInfo đã index: trước đây editor phải gọi
-/// thêm `refresh()` ngay sau mỗi lần lưu, tức là quét + index toàn vault HAI lần
-/// cho một nhịp gõ. Canvas thì không cần, và vault_info có `list_dirs` (walkdir)
-/// nên bắt nó dựng info mỗi 600ms lúc kéo node là phí.
+/// `with_info` = true thì trả VaultInfo đã index — nhưng chỉ khi lần ghi này làm
+/// overview đổi (note mới, title đổi, tập link đổi), còn lại trả `None`. Canvas
+/// thì không bao giờ cần, và vault_info có `list_dirs` (walkdir) nên bắt nó dựng
+/// info mỗi 600ms lúc kéo node là phí.
 fn write_note(
     path: String,
     content: String,
@@ -183,9 +183,17 @@ fn write_note(
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(abs, &content)?;
-        let stats = v.index()?;
-        if with_info.unwrap_or(false) {
-            Ok(Some(vault_info(v, stats.duration_ms)?))
+        // Chỉ index đúng file vừa ghi: `index()` walkdir + resolve link cả vault,
+        // chạy mỗi ~800ms lúc gõ là phí khi ta đã biết file nào đổi. Thay đổi từ
+        // bên ngoài app vẫn do watcher bắt và index toàn bộ.
+        let t0 = Instant::now();
+        let outcome = v.index_file(&path)?;
+        // Đa số nhịp autosave chỉ đổi chữ trong thân note: cây note, thư mục và số
+        // link/link gãy y nguyên, nên khỏi dựng vault_info (note_list + 5 COUNT +
+        // walkdir thư mục) rồi serialize cả danh sách note về UI. Đổi lại mtime
+        // trong danh sách của UI cũ đi lúc gõ — note picker tự refresh khi mở.
+        if with_info.unwrap_or(false) && outcome.changes_overview() {
+            Ok(Some(vault_info(v, t0.elapsed().as_millis())?))
         } else {
             Ok(None)
         }
@@ -214,7 +222,9 @@ fn create_note(path: String, state: State<AppState>) -> CmdResult<String> {
             .and_then(|s| s.to_str())
             .unwrap_or("Untitled");
         std::fs::write(abs, format!("# {stem}\n\n"))?;
-        v.index()?;
+        // Đúng một file mới → index_file đủ (nó tự resolve lại các link đang gãy
+        // có thể đang chờ chính note này).
+        v.index_file(&rel)?;
         Ok(rel)
     })
 }
